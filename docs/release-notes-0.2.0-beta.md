@@ -21,4 +21,4 @@ Files
 - Lacquer-0.2.0-source.tar.gz: corresponding source for the app and the bundled FFmpeg, x264, zimg and tsMuxeR, with the build scripts.
 - SHA256SUMS
 
-SHA-256: `3132b8fbf8c5277188e18e5b106c0302d2143856c8ba7364b5acc89f352b5b15`
+SHA-256: `915c3a6d5ef9e931457726c0e5fcf222b11c03e45e5dce6286db81a8451b37d5`
