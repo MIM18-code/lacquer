@@ -120,6 +120,9 @@ enum MenuNavigation {
 // MARK: - Planner
 
 enum MenuPlanner {
+    /// Room for up to two lines of subtitle (40 px type).
+    static let subtitleMaxHeight: CGFloat = 110
+
     static func plan(template: MenuTemplate, chapters: [Double], hasSubtitles: Bool) -> MenuPlan {
         let style = MenuStyle.style(for: template.style)
         let settings = template.scenePages.clamped
@@ -172,7 +175,7 @@ enum MenuPlanner {
             guard !subtitleString.isEmpty else { return nil }
             return TypeBlock.fitting(style.subtitleUppercase ? subtitleString.uppercased() : subtitleString,
                                      font: style.subtitleFont, tracking: style.subtitleTracking,
-                                     maxWidth: width, maxHeight: 80, maxLines: 1, minSize: 32, lineHeight: 1.2)
+                                     maxWidth: width, maxHeight: Self.subtitleMaxHeight, maxLines: 2, minSize: 32, lineHeight: 1.2)
         }
 
         switch style.mainLayout {
@@ -243,7 +246,7 @@ enum MenuPlanner {
             decor.append(PlannedDecor(role: .accentBar, rect: CGRect(x: MenuGeometry.titleSafe.minX, y: MenuGeometry.titleSafe.minY, width: 72, height: 8)))
             var cursor = MenuGeometry.titleSafe.minY + 8 + 40
             let maxTitleBottom = listTop - 40
-            let subH: CGFloat = subtitleString.isEmpty ? 0 : 49 + 24
+            let subH: CGFloat = subtitleString.isEmpty ? 0 : Self.subtitleMaxHeight + 24
             if let title = titleBlock(width: 1060, height: max(120, min(430, maxTitleBottom - cursor - subH)), maxLines: 5, minSize: 56, align: .left) {
                 texts.append(PlacedText(role: .title, block: title, x: MenuGeometry.titleSafe.minX, top: cursor, width: 1060, align: .left))
                 cursor += title.height + 24
