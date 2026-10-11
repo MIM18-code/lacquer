@@ -11,6 +11,11 @@ struct EncodeRequest: Sendable {
     var subtitleLanguage: String = "eng"
     /// On-screen menu for BDMV output. nil: the disc auto-plays the film.
     var menu: DiscMenu?
+    /// The job's menu design. The pipeline renders it into `menu` once the
+    /// chapter times are known.
+    var menuTemplate: MenuTemplate?
+
+    var wantsMenu: Bool { menu != nil || menuTemplate != nil }
 
     init(job: EncodeJob, settings: EncodeSettings) {
         self.input = job.inputURL
@@ -20,6 +25,7 @@ struct EncodeRequest: Sendable {
         self.audio = job.audioSource
         self.subtitle = job.subtitleURL
         self.subtitleLanguage = job.subtitleLanguageCode.isEmpty ? "eng" : job.subtitleLanguageCode
+        self.menuTemplate = Features.discMenus ? job.menu : nil
     }
 
     init(input: URL, info: MediaInfo, settings: EncodeSettings,
@@ -138,7 +144,7 @@ struct EncodePlan: Equatable, Sendable {
         case .discrete:
             break
         }
-        if req.menu != nil {
+        if req.wantsMenu {
             switch settings.outputMode {
             case .bdmvFolder: break
             case .iso: break
@@ -279,6 +285,7 @@ struct EncodePipeline {
         onStage: @escaping @Sendable (EncodeStage, Double) -> Void,
         onLog: @escaping @Sendable (String) -> Void
     ) async throws -> Output {
+        var req = req
         let fm = FileManager.default
         let info = req.info
         let settings = req.settings
@@ -372,6 +379,23 @@ struct EncodePipeline {
             log.error("\(stage) failed: \(error.localizedDescription)")
             log.closeWithStatus("FAILED — \(stage.lowercased())")
             return PipelineError.stage(stage, detail: error.localizedDescription, log: logURL)
+        }
+
+        // ---- Menu ----
+        // Rendered before the long encode so a problem with the design (a
+        // missing background image) fails in seconds, not hours.
+        if req.menu == nil, let template = req.menuTemplate, settings.outputMode != .m2tsOnly {
+            onLog("  rendering the disc menu")
+            log.section("MENU RENDER")
+            let hdr = info.isHDR && capabilities.canTonemapHDR ? info.colorTransfer : nil
+            do {
+                req.menu = try await MenuRenderer(ffmpeg: tools.ffmpeg, hdrTransfer: hdr)
+                    .render(template: template, film: req.input, chapters: plan.chapterTimes,
+                            hasSubtitles: req.subtitle != nil)
+                log.write("Rendered \(req.menu?.pages.count ?? 0) menu pages (\(template.style.displayName))")
+            } catch {
+                throw fail("Menu render", error)
+            }
         }
 
         // ---- Subtitles ----
