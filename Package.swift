@@ -13,6 +13,11 @@ let package = Package(
         .executableTarget(
             name: "BluRayCompressor",
             path: "Sources/BluRayCompressor"
+        ),
+        .testTarget(
+            name: "BluRayCompressorTests",
+            dependencies: ["BluRayCompressor"],
+            path: "Tests/BluRayCompressorTests"
         )
     ]
 )

@@ -23,7 +23,7 @@ struct MediaProbe {
         return try parse(json)
     }
 
-    private func parse(_ json: [String: Any]) throws -> MediaInfo {
+    func parse(_ json: [String: Any]) throws -> MediaInfo {
         let format = json["format"] as? [String: Any] ?? [:]
         let duration = Double((format["duration"] as? String) ?? "0") ?? 0
 
@@ -64,16 +64,32 @@ struct MediaProbe {
         // or is absent for sources where it can't be determined. Treat anything
         // other than "progressive" (or absent) as interlaced.
         let fieldOrder = (v["field_order"] as? String)?.lowercased() ?? "progressive"
-        let sourceIsInterlaced = !(fieldOrder == "progressive" || fieldOrder.isEmpty)
+        let sourceIsInterlaced = !(fieldOrder == "progressive" || fieldOrder.isEmpty
+                                   || fieldOrder == "unknown")
+
+        // Some containers (MXF, raw streams) leave format duration empty but
+        // carry it on the video stream.
+        let streamDuration = Double((v["duration"] as? String) ?? "0") ?? 0
+        let resolvedDuration = duration > 0 ? duration : streamDuration
+        guard resolvedDuration > 0 else {
+            throw NSError(
+                domain: "MediaProbe", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Couldn't read the file's duration."]
+            )
+        }
 
         return MediaInfo(
-            duration: duration,
+            duration: resolvedDuration,
             width: width,
             height: height,
             videoCodec: codec,
             frameRate: fps,
             audioStreams: audioStreams,
-            sourceIsInterlaced: sourceIsInterlaced
+            sourceIsInterlaced: sourceIsInterlaced,
+            colorTransfer: (v["color_transfer"] as? String) ?? "",
+            colorPrimaries: (v["color_primaries"] as? String) ?? "",
+            colorSpace: (v["color_space"] as? String) ?? "",
+            pixelFormat: (v["pix_fmt"] as? String) ?? ""
         )
     }
 
@@ -86,9 +102,16 @@ struct MediaProbe {
         let tags = s["tags"] as? [String: Any] ?? [:]
         let language = (tags["language"] as? String)
             ?? (tags["LANGUAGE"] as? String)
+        // QuickTime handler names like "SoundHandler" or "Core Media Audio"
+        // say nothing about the track, so only a real name counts as a title.
+        let handler = (tags["handler_name"] as? String).flatMap { name -> String? in
+            let generic = ["soundhandler", "core media audio", "apple sound media handler",
+                           "sound media handler", "gpac isomedia handler"]
+            return generic.contains(name.lowercased()) || name.isEmpty ? nil : name
+        }
         let title = (tags["title"] as? String)
             ?? (tags["TITLE"] as? String)
-            ?? (tags["handler_name"] as? String)
+            ?? handler
         return AudioStreamInfo(
             ffmpegIndex: index,
             codec: codec,
@@ -110,6 +133,21 @@ struct MediaProbe {
 // MARK: - Audio stream selection
 
 enum AudioStreamPicker {
+    /// Picks the disc's audio. A multichannel stream wins. Without one, six
+    /// or more discrete mono tracks (how Resolve and Premiere often export a
+    /// 5.1 master) are joined into 5.1, and two mono tracks into stereo.
+    static func bestSource(for info: MediaInfo) -> AudioSource {
+        guard let best = bestStream(from: info.audioStreams) else { return .silence }
+        let mono = info.monoStreams.map(\.ffmpegIndex)
+        if best.channels < 6 && mono.count >= 6 {
+            return .discrete(Array(mono.prefix(6)), .smpte)
+        }
+        if best.channels < 2 && mono.count >= 2 {
+            return .discrete(Array(mono.prefix(2)), .smpte)
+        }
+        return .stream(best.ffmpegIndex)
+    }
+
     /// Picks the audio stream most likely to be the primary surround program.
     /// Prefers the highest channel count, then a tagged surround layout
     /// (5.1 or 7.1) over an untagged one, then the first stream as a tiebreak.

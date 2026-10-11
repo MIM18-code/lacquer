@@ -1,0 +1,42 @@
+{
+  "ffmpeg": {
+    "file": "ffmpeg-9.0.2.tar.xz",
+    "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+    "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+    "version": "9.0.2",
+    "license": "GPL-3.0-or-later (built with --enable-gpl --enable-version3)",
+    "note": "Release tarball from ffmpeg.org (9.0 point release current on 2026-10-11)."
+  },
+  "x264": {
+    "file": "x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz",
+    "url": "https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz",
+    "sha256": "cd71a7515b0e9a012e1ac9b1f8415bebcaf6fc97d4db32286642ac4c0fbe24f9",
+    "version": "stable@b35605ac",
+    "license": "GPL-2.0-or-later",
+    "note": "Tip of the stable branch on 2026-10-11, pinned by commit."
+  },
+  "zimg": {
+    "file": "zimg-release-3.0.6.tar.gz",
+    "url": "https://github.com/sekrit-twc/zimg/archive/refs/tags/release-3.0.6.tar.gz",
+    "sha256": "be89390f13a5c9b2388ce0f44a5e89364a20c1c57ce46d382b1fcc3967057577",
+    "version": "3.0.6",
+    "license": "WTFPL-2.0",
+    "note": "Provides the zscale filter for HDR to SDR tone mapping. Same hash as the Homebrew formula."
+  },
+  "tsmuxer": {
+    "file": "tsMuxer-2.7.0-mac.zip",
+    "url": "https://github.com/justdan96/tsMuxer/releases/download/2.7.0/tsMuxer-2.7.0-mac.zip",
+    "sha256": "bf90b608321f491b955fd9432000a8370c048e9c306e3a5833dfd75e5fa530e1",
+    "version": "2.7.0",
+    "license": "Apache-2.0",
+    "note": "Upstream release binary, thin arm64, links only /usr/lib. Not rebuilt by us."
+  },
+  "tsmuxer_source": {
+    "file": "tsMuxer-2.7.0-source.tar.gz",
+    "url": "https://github.com/justdan96/tsMuxer/archive/refs/tags/2.7.0.tar.gz",
+    "sha256": "9ec281325ed5e2083720f0aa8ab628b5da4f97e215466d77b42ac965bc8c3ea7",
+    "version": "2.7.0",
+    "license": "Apache-2.0",
+    "note": "Source for the tsMuxeR binary above (tag 2.7.0, commit f06ac394c55ccee1cb76ae54f4636532a2d10253). Shipped in the source archive and used for the license text."
+  }
+}

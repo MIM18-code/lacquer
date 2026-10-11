@@ -2,11 +2,18 @@ import Foundation
 
 // MARK: - Disc size
 
-enum DiscSize: String, CaseIterable, Identifiable, Sendable {
+enum DiscSize: String, CaseIterable, Identifiable, Codable, Sendable {
     case bd25 = "BD-25 (25 GB, single layer)"
     case bd50 = "BD-50 (50 GB, dual layer)"
 
     var id: String { rawValue }
+
+    var shortName: String {
+        switch self {
+        case .bd25: return "BD-25"
+        case .bd50: return "BD-50"
+        }
+    }
 
     /// Usable bytes after UDF + BDMV overhead (~2%).
     var usableBytes: Int64 {
@@ -19,7 +26,7 @@ enum DiscSize: String, CaseIterable, Identifiable, Sendable {
 
 // MARK: - Video standard
 
-enum VideoStandard: String, CaseIterable, Identifiable, Sendable {
+enum VideoStandard: String, CaseIterable, Identifiable, Codable, Sendable {
     case p1080_2398 = "1080p / 23.976 fps"
     case p1080_24   = "1080p / 24 fps"
     case i1080_2997 = "1080i / 29.97 fps (NTSC)"
@@ -30,6 +37,23 @@ enum VideoStandard: String, CaseIterable, Identifiable, Sendable {
     case p720_24    = "720p / 24 fps"
 
     var id: String { rawValue }
+
+    /// Compact label for job rows ("1080i29.97").
+    var shortName: String {
+        switch self {
+        case .p1080_2398: return "1080p23.976"
+        case .p1080_24:   return "1080p24"
+        case .i1080_2997: return "1080i29.97"
+        case .i1080_25:   return "1080i25"
+        case .p720_5994:  return "720p59.94"
+        case .p720_50:    return "720p50"
+        case .p720_2398:  return "720p23.976"
+        case .p720_24:    return "720p24"
+        }
+    }
+
+    /// Value accepted by the headless CLI's `--standard` flag.
+    var cliName: String { shortName.lowercased() }
 
     var width: Int {
         switch self {
@@ -57,7 +81,8 @@ enum VideoStandard: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// Decimal frame rate for display and tsMuxeR meta files.
+    /// Decimal frame rate for display and tsMuxeR meta files. For the 1080i
+    /// standards this is the *frame* rate (two fields per frame).
     var frameRateValue: Double {
         switch self {
         case .p1080_2398, .p720_2398: return 24000.0 / 1001.0
@@ -91,21 +116,108 @@ enum VideoStandard: String, CaseIterable, Identifiable, Sendable {
     var isInterlaced: Bool {
         self == .i1080_2997 || self == .i1080_25
     }
+
+    /// The Blu-ray standard that carries a source's motion without dropping
+    /// or repeating frames. Blu-ray has no 1080p25 or 1080p29.97, so 25p and
+    /// 29.97p sources go out as 1080i flagged as progressive segmented
+    /// frames, and 50p/59.94p sources are paired into fields. Rates that
+    /// match nothing fall back to 1080p23.976.
+    static func suggested(forFrameRate fps: Double, interlaced: Bool) -> VideoStandard {
+        func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.02 }
+        if interlaced {
+            if near(fps, 25) { return .i1080_25 }
+            if near(fps, 29.97) || near(fps, 30) { return .i1080_2997 }
+        }
+        if near(fps, 23.976) { return .p1080_2398 }
+        if near(fps, 24) { return .p1080_24 }
+        if near(fps, 25) || near(fps, 50) { return .i1080_25 }
+        if near(fps, 29.97) || near(fps, 30) || near(fps, 59.94) || near(fps, 60) { return .i1080_2997 }
+        return .p1080_2398
+    }
+
+    /// How cleanly a source's frame rate maps onto this standard. Nil means
+    /// every source frame (or field) lands on the disc once.
+    func rateNote(sourceFrameRate fps: Double, sourceInterlaced: Bool) -> RateNote? {
+        guard fps > 0 else { return nil }
+        let target = frameRateValue
+        // Candidate source cadences this standard can carry 1:1.
+        var clean: [Double] = [target]
+        if isInterlaced {
+            // Progressive at the field rate pairs into fields.
+            if !sourceInterlaced { clean.append(target * 2) }
+        } else if sourceInterlaced {
+            // bwdif send_field turns each field into a frame, so an
+            // interlaced source at half the target rate maps 1:1.
+            clean.append(target / 2)
+        }
+        func ratio(_ c: Double) -> Double { fps / c }
+        if clean.contains(where: { abs(ratio($0) - 1) < 0.0002 }) { return nil }
+
+        let sourceLabel = Self.formatRate(fps) + (sourceInterlaced ? "i" : " fps")
+        let targetLabel = shortName
+        // 1000/1001 pairs (24 vs 23.976, 30 vs 29.97, 60 vs 59.94).
+        if clean.contains(where: { abs(ratio($0) - 1) < 0.0015 }) {
+            let base = clean.first(where: { abs(ratio($0) - 1) < 0.0015 }) ?? target
+            let secondsPerFrame = 1 / abs(fps - base)
+            let verb = fps > base ? "dropped" : "repeated"
+            return .minor("\(sourceLabel) source on \(targetLabel): one frame \(verb) every \(Int(secondsPerFrame.rounded())) s.")
+        }
+        let suggestion = Self.suggested(forFrameRate: fps, interlaced: sourceInterlaced)
+        let hint = suggestion == self ? "" : " Use \(suggestion.shortName) instead."
+        if fps > target {
+            let dropped = (1 - target / fps) * 100
+            return .major("\(sourceLabel) source on \(targetLabel) drops about \(Int(dropped.rounded()))% of frames, so motion will stutter.\(hint)")
+        }
+        let repeated = (target / fps - 1) * 100
+        return .major("\(sourceLabel) source on \(targetLabel) repeats about \(Int(repeated.rounded()))% of frames, so motion will judder.\(hint)")
+    }
+
+    static func formatRate(_ fps: Double) -> String {
+        let rounded = (fps * 1000).rounded() / 1000
+        if rounded == rounded.rounded() { return String(Int(rounded)) }
+        return String(format: "%.3f", rounded)
+            .replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
+    }
+
+    static func fromCLIName(_ name: String) -> VideoStandard? {
+        allCases.first { $0.cliName == name.lowercased() }
+    }
+}
+
+enum RateNote: Equatable, Sendable {
+    /// 1000/1001 mismatch: a frame dropped or repeated every ~40 seconds.
+    case minor(String)
+    /// Visible stutter or judder.
+    case major(String)
+
+    var message: String {
+        switch self {
+        case .minor(let m), .major(let m): return m
+        }
+    }
 }
 
 // MARK: - Output mode
 
-enum OutputMode: String, CaseIterable, Identifiable, Sendable {
+enum OutputMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case bdmvFolder = "BDMV Folder (ready to burn)"
     case iso        = "ISO Disc Image (.iso)"
     case m2tsOnly   = "M2TS File Only (for Toast)"
 
     var id: String { rawValue }
+
+    var shortName: String {
+        switch self {
+        case .bdmvFolder: return "BDMV"
+        case .iso:        return "ISO"
+        case .m2tsOnly:   return "M2TS"
+        }
+    }
 }
 
 // MARK: - Chapters
 
-enum ChaptersMode: String, CaseIterable, Identifiable, Sendable {
+enum ChaptersMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case none   = "None (auto-play only)"
     case auto5  = "Auto — every 5 min"
     case auto10 = "Auto — every 10 min"
@@ -114,7 +226,7 @@ enum ChaptersMode: String, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
 }
 
-struct ChaptersConfig: Equatable, Sendable {
+struct ChaptersConfig: Equatable, Codable, Sendable {
     var mode: ChaptersMode = .auto5
     /// Used only when `mode == .custom`. Accepts comma, newline, or
     /// semicolon-separated entries in `HH:MM:SS`, `MM:SS`, or `SS` form.
@@ -151,24 +263,27 @@ struct ChaptersConfig: Equatable, Sendable {
         return times
     }
 
-    private static func parseTime(_ s: String) -> Double? {
+    static func parseTime(_ s: String) -> Double? {
         guard !s.isEmpty else { return nil }
         let parts = s.split(separator: ":").map(String.init)
+        let value: Double?
         switch parts.count {
         case 3:
             guard let h = Double(parts[0]),
                   let m = Double(parts[1]),
                   let sec = Double(parts[2]) else { return nil }
-            return h * 3600 + m * 60 + sec
+            value = h * 3600 + m * 60 + sec
         case 2:
             guard let m = Double(parts[0]),
                   let sec = Double(parts[1]) else { return nil }
-            return m * 60 + sec
+            value = m * 60 + sec
         case 1:
-            return Double(parts[0])
+            value = Double(parts[0])
         default:
-            return nil
+            value = nil
         }
+        guard let value, value.isFinite else { return nil }
+        return value
     }
 }
 
@@ -182,24 +297,40 @@ private extension Array where Element: Equatable {
     }
 }
 
-// MARK: - Preset
+// MARK: - Settings
 
-struct BluRayPreset: Equatable, Sendable {
-    var discSize: DiscSize
-    var standard: VideoStandard
-    var outputMode: OutputMode
-    var audioBitrateKbps: Int     // 448 or 640
-    var twoPass: Bool
-    var chapters: ChaptersConfig
+/// Sidebar settings. Pending jobs read these when they start, so changing a
+/// setting affects every job that hasn't run yet. Per-job choices (video
+/// standard override, audio source, subtitles) live on `EncodeJob`.
+struct EncodeSettings: Equatable, Codable, Sendable {
+    var discSize: DiscSize = .bd25
+    /// Nil means pick the standard that matches each source's frame rate.
+    var videoStandard: VideoStandard? = nil
+    var outputMode: OutputMode = .bdmvFolder
+    var audioBitrateKbps: Int = 640     // 448 or 640
+    var twoPass: Bool = true
+    var chapters = ChaptersConfig()
+    /// Nil means write output next to each source file.
+    var outputFolderPath: String? = nil
 
-    static let `default` = BluRayPreset(
-        discSize: .bd25,
-        standard: .p1080_2398,
-        outputMode: .bdmvFolder,
-        audioBitrateKbps: 640,
-        twoPass: true,
-        chapters: ChaptersConfig()
-    )
+    var outputFolder: URL? {
+        outputFolderPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
+    }
+
+    static let defaultsKey = "encodeSettings.v1"
+
+    static func load(from defaults: UserDefaults = .standard) -> EncodeSettings {
+        guard let data = defaults.data(forKey: defaultsKey),
+              let decoded = try? JSONDecoder().decode(EncodeSettings.self, from: data)
+        else { return EncodeSettings() }
+        return decoded
+    }
+
+    func save(to defaults: UserDefaults = .standard) {
+        if let data = try? JSONEncoder().encode(self) {
+            defaults.set(data, forKey: Self.defaultsKey)
+        }
+    }
 }
 
 // MARK: - Media info
@@ -223,6 +354,8 @@ struct AudioStreamInfo: Equatable, Sendable, Identifiable {
 
     var id: Int { ffmpegIndex }
 
+    var isMono: Bool { channels == 1 }
+
     /// Display string for the stream picker — short and dense.
     var displayLabel: String {
         var parts: [String] = []
@@ -245,6 +378,48 @@ struct AudioStreamInfo: Equatable, Sendable, Identifiable {
     }
 }
 
+/// Channel order of a set of discrete mono tracks.
+enum DiscreteOrder: String, Codable, Sendable, CaseIterable {
+    /// L R C LFE Ls Rs: SMPTE/ITU order, the default in Resolve, Premiere
+    /// and Final Cut exports.
+    case smpte
+    /// L C R Ls Rs LFE: film (Pro Tools) order.
+    case film
+
+    var label: String {
+        switch self {
+        case .smpte: return "L R C LFE Ls Rs"
+        case .film:  return "L C R Ls Rs LFE"
+        }
+    }
+}
+
+/// Where the disc's audio comes from.
+enum AudioSource: Hashable, Codable, Sendable {
+    /// One source stream, downmixed to 5.1 if it has more channels.
+    case stream(Int)
+    /// Several mono streams joined into one program: 2 streams make stereo,
+    /// 6 make 5.1 in the given channel order.
+    case discrete([Int], DiscreteOrder)
+    /// No audio in the source: the disc gets a silent stereo track, since
+    /// some players refuse a title without audio.
+    case silence
+
+    var channelCount: Int {
+        switch self {
+        case .stream: return 0  // depends on the stream
+        case .discrete(let idx, _): return idx.count
+        case .silence: return 2
+        }
+    }
+}
+
+struct AudioOption: Hashable, Identifiable, Sendable {
+    var source: AudioSource
+    var label: String
+    var id: AudioSource { source }
+}
+
 struct MediaInfo: Equatable, Sendable {
     var duration: Double
     var width: Int
@@ -253,27 +428,88 @@ struct MediaInfo: Equatable, Sendable {
     var frameRate: Double
     var audioStreams: [AudioStreamInfo]
     var sourceIsInterlaced: Bool
+    /// ffprobe `color_transfer`, `color_primaries`, `color_space`; empty when untagged.
+    var colorTransfer: String = ""
+    var colorPrimaries: String = ""
+    var colorSpace: String = ""
+    var pixelFormat: String = ""
 
-    /// Convenience accessor for the first stream — used by the auto-picker
-    /// fallback when nothing scored higher.
+    /// PQ (HDR10, Dolby Vision base layer) or HLG.
+    var isHDR: Bool {
+        colorTransfer == "smpte2084" || colorTransfer == "arib-std-b67"
+    }
+
+    /// Standard-definition matrices that need converting to BT.709.
+    var usesBT601Matrix: Bool {
+        ["smpte170m", "bt470bg", "bt601"].contains(colorSpace)
+    }
+
     var firstAudioStream: AudioStreamInfo? { audioStreams.first }
+
+    var monoStreams: [AudioStreamInfo] { audioStreams.filter(\.isMono) }
+
+    func audioStream(index: Int) -> AudioStreamInfo? {
+        audioStreams.first { $0.ffmpegIndex == index }
+    }
+
+    /// Every audio choice the job picker offers, single streams first.
+    var audioOptions: [AudioOption] {
+        if audioStreams.isEmpty {
+            return [AudioOption(source: .silence, label: "No audio in source (silent track)")]
+        }
+        var options = audioStreams.map {
+            AudioOption(source: .stream($0.ffmpegIndex), label: "Track \($0.ffmpegIndex): \($0.displayLabel)")
+        }
+        let mono = monoStreams.map(\.ffmpegIndex)
+        if mono.count >= 6 {
+            let six = Array(mono.prefix(6))
+            for order in DiscreteOrder.allCases {
+                options.append(AudioOption(
+                    source: .discrete(six, order),
+                    label: "Mono tracks \(Self.rangeLabel(six)) as 5.1 (\(order.label))"
+                ))
+            }
+        }
+        if mono.count >= 2 {
+            let two = Array(mono.prefix(2))
+            options.append(AudioOption(
+                source: .discrete(two, .smpte),
+                label: "Mono tracks \(Self.rangeLabel(two)) as stereo (L R)"
+            ))
+        }
+        return options
+    }
+
+    func label(for source: AudioSource) -> String {
+        audioOptions.first { $0.source == source }?.label ?? "Unknown audio"
+    }
+
+    private static func rangeLabel(_ idx: [Int]) -> String {
+        guard let first = idx.first, let last = idx.last else { return "" }
+        let contiguous = zip(idx, idx.dropFirst()).allSatisfy { $1 == $0 + 1 }
+        return contiguous ? "\(first)–\(last)" : idx.map(String.init).joined(separator: ",")
+    }
 }
 
 // MARK: - Job
 
 enum JobStatus: String, Equatable, Sendable {
-    case pending = "Pending"
-    case running = "Running"
-    case done    = "Done"
-    case failed  = "Failed"
+    case pending   = "Pending"
+    case running   = "Running"
+    case done      = "Done"
+    case failed    = "Failed"
+    case cancelled = "Stopped"
+
+    var canRetry: Bool { self == .failed || self == .cancelled }
+    var isEditable: Bool { self == .pending || canRetry }
 }
 
 enum EncodeStage: String, Equatable, Sendable {
     case idle          = "Idle"
-    case probing       = "Analyzing source"
+    case checking      = "Checking"
     case encodingVideo = "Encoding video"
     case encodingAudio = "Encoding audio"
-    case muxing        = "Authoring BDMV"
+    case muxing        = "Authoring disc"
     case done          = "Done"
     case failed        = "Failed"
 }
@@ -281,29 +517,36 @@ enum EncodeStage: String, Equatable, Sendable {
 struct EncodeJob: Identifiable, Equatable, Sendable {
     let id: UUID
     var inputURL: URL
-    var outputURL: URL
-    var preset: BluRayPreset
-    var mediaInfo: MediaInfo?
-    /// ffmpeg stream index of the audio track to encode. Defaults to the
-    /// auto-picked best track; the user can override before running.
-    var selectedAudioIndex: Int?
+    var mediaInfo: MediaInfo
+    /// Per-job video standard. Nil follows the sidebar setting.
+    var standardOverride: VideoStandard?
+    var audioSource: AudioSource
     /// Optional .srt file. When present, tsMuxeR converts it to PGS at mux
     /// time so the disc gets viewer-selectable soft subtitles.
     var subtitleURL: URL?
     /// ISO 639-2/B language code (3-letter) tagged on the PGS track. Players
     /// that filter subtitle tracks by preferred language need this to match.
-    /// Defaults to "eng"; user can override per job when attaching the .srt.
     var subtitleLanguageCode: String = "eng"
     var status: JobStatus = .pending
     var stage: EncodeStage = .idle
     var progress: Double = 0
-    var stageProgress: Double = 0
+    var startedAt: Date?
     var errorMessage: String?
+    /// Set when the job finishes or fails after writing a log.
+    var outputURL: URL?
+    var logURL: URL?
 
-    init(inputURL: URL, outputURL: URL, preset: BluRayPreset) {
+    init(inputURL: URL, mediaInfo: MediaInfo) {
         self.id = UUID()
         self.inputURL = inputURL
-        self.outputURL = outputURL
-        self.preset = preset
+        self.mediaInfo = mediaInfo
+        self.audioSource = AudioStreamPicker.bestSource(for: mediaInfo)
+    }
+
+    func standard(with settings: EncodeSettings) -> VideoStandard {
+        standardOverride
+            ?? settings.videoStandard
+            ?? VideoStandard.suggested(forFrameRate: mediaInfo.frameRate,
+                                       interlaced: mediaInfo.sourceIsInterlaced)
     }
 }
