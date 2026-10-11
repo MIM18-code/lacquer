@@ -30,6 +30,11 @@ struct HDMVMenuAuthor {
     static let menuFrameRate = M2TSMuxer.FrameRate(numerator: 24000, denominator: 1001)
     static let menuLanguage = "eng"
 
+    /// Longest menu loop. Ten minutes of still frames is already far more
+    /// than any menu needs, and keeps frame counts and the clip's 32-bit
+    /// 45 kHz times far from overflow.
+    static let maxLoopSeconds: Double = 600
+
     static func menuPlaylist(page: Int) -> Int { 1000 + page }
     static func menuObject(page: Int) -> Int { 1 + page }
     static func clipName(_ number: Int) -> String { String(format: "%05d", number) }
@@ -60,6 +65,11 @@ struct HDMVMenuAuthor {
     static func navigation(for menu: DiscMenu, film: PlaylistSummary) throws -> Navigation {
         guard !menu.pages.isEmpty else { throw MenuError.invalid("it has no pages") }
         guard menu.pages.count <= 1000 else { throw MenuError.invalid("it has more than 1000 pages") }
+        // loopSeconds <= 0 means a still menu; anything else must be a
+        // real, bounded duration before it becomes a frame count.
+        guard menu.loopSeconds.isFinite, menu.loopSeconds <= maxLoopSeconds else {
+            throw MenuError.invalid("its loop of \(menu.loopSeconds) seconds isn't between 0 and \(Int(maxLoopSeconds))")
+        }
         guard menu.pages.indices.contains(menu.firstPage) else {
             throw MenuError.invalid("first page \(menu.firstPage + 1) doesn't exist")
         }

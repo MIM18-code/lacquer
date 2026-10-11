@@ -33,11 +33,17 @@ final class UDFImageWriter {
     enum WriteError: LocalizedError {
         case io(String)
         case tooManyEntries(String)
+        case source(String)
+        case badName(String, String)
+        case overrun(String)
 
         var errorDescription: String? {
             switch self {
             case .io(let m): return "Writing the disc image failed: \(m)"
             case .tooManyEntries(let m): return "The disc image can't hold this layout: \(m)"
+            case .source(let m): return "Can't make a disc image: \(m)"
+            case .badName(let name, let why): return "Can't put \"\(name)\" on the disc: \(why)."
+            case .overrun(let what): return "Writing the disc image failed: the \(what) didn't fit its sector."
             }
         }
     }
@@ -65,7 +71,7 @@ final class UDFImageWriter {
 
     final class Entry {
         let parent: Entry?
-        let objectID: UInt8
+        let objectID: UInt32
         let type: FileType
         var name = ""
         var sector = 0
@@ -75,7 +81,7 @@ final class UDFImageWriter {
         var subdirectories: [Entry] = []
         var files: [Entry] = []
 
-        init(parent: Entry?, objectID: UInt8, type: FileType) {
+        init(parent: Entry?, objectID: UInt32, type: FileType) {
             self.parent = parent; self.objectID = objectID; self.type = type
         }
     }
@@ -102,27 +108,141 @@ final class UDFImageWriter {
     private var tagBase = 0
     private var currentMetadataPos = 0
     private var lastWrittenObjectID = -1
-    private var mapping: [UInt8: (parent: Int, lbn: Int)] = [:]
+    private var mappingReserve = 0
+    private var mappingBytes = 0
+    private var mapping: [UInt32: (parent: Int, lbn: Int)] = [:]
 
     // MARK: - Whole-folder convenience
+
+    /// The directories tsMuxeR creates on every disc, in its order.
+    static let standardDirectories = [
+        "BDMV/META", "BDMV/BDJO", "BDMV/JAR", "BDMV/BACKUP/BDJO", "BDMV/BACKUP/JAR",
+        "CERTIFICATE/BACKUP", "BDMV/AUXDATA", "BDMV/CLIPINF", "BDMV/PLAYLIST", "BDMV/STREAM",
+        "BDMV/BACKUP/CLIPINF", "BDMV/BACKUP/PLAYLIST"
+    ]
+
+    /// What a disc's file tree needs, worked out before anything is written.
+    struct Layout: Equatable {
+        /// Metadata partition sectors: file set and terminating descriptors,
+        /// every directory's entry and identifier sectors, every file entry,
+        /// and the system stream directory with its unique-ID map.
+        var metadataSectors: Int
+        /// Size of the unique-ID map file.
+        var mappingBytes: Int
+        var directories: Int
+        var files: Int
+    }
+
+    /// Plans the image of these files (paths relative to the disc root, as
+    /// in "BDMV/STREAM/00000.m2ts") plus the standard directories. Throws
+    /// for names UDF can't store.
+    static func plan(paths: [String]) throws -> Layout {
+        var children: [String: [String]] = ["": []]
+        func addDirectory(_ path: String) {
+            var parent = ""
+            for part in path.split(separator: "/").map(String.init) {
+                let full = parent.isEmpty ? part : parent + "/" + part
+                if children[full] == nil {
+                    children[full] = []
+                    children[parent, default: []].append(part)
+                }
+                parent = full
+            }
+        }
+        standardDirectories.forEach(addDirectory)
+        var fileCount = 0
+        for path in paths {
+            let parts = path.split(separator: "/").map(String.init)
+            guard let name = parts.last else { continue }
+            let dir = parts.dropLast().joined(separator: "/")
+            addDirectory(dir)
+            children[dir, default: []].append(name)
+            fileCount += 1
+        }
+        var sectors = 2                                     // file set + terminating descriptors
+        for (dir, names) in children {
+            if !dir.isEmpty { _ = try fileIdentifier(String(dir.split(separator: "/").last!)) }
+            sectors += 1 + Self.sectors(forDirectoryBytes: try directoryBytes(names))
+        }
+        sectors += fileCount                                // one file entry each
+        sectors += 3                                        // system stream directory, its map's entry
+        let entries = children.count - 1 + fileCount
+        return Layout(metadataSectors: sectors, mappingBytes: 48 + 16 * entries,
+                      directories: children.count, files: fileCount)
+    }
+
+    /// The files Lacquer writes for a film with a menu of `menuPages` pages
+    /// (tsMuxeR's film files plus, per page, a clip, its CLPI and MPLS and
+    /// their backups).
+    static func menuDiscPaths(menuPages: Int) -> [String] {
+        var paths = ["BDMV/index.bdmv", "BDMV/MovieObject.bdmv",
+                     "BDMV/BACKUP/index.bdmv", "BDMV/BACKUP/MovieObject.bdmv"]
+        for clip in [0] + (0..<max(0, menuPages)).map({ 1000 + $0 }) {
+            let n = String(format: "%05d", clip)
+            paths += ["BDMV/STREAM/\(n).m2ts", "BDMV/CLIPINF/\(n).clpi", "BDMV/PLAYLIST/\(n).mpls",
+                      "BDMV/BACKUP/CLIPINF/\(n).clpi", "BDMV/BACKUP/PLAYLIST/\(n).mpls"]
+        }
+        return paths
+    }
+
+    /// Pre-flight for a menu disc as an ISO: throws if a menu of
+    /// `menuPages` pages couldn't be imaged. Cheap; call before encoding.
+    @discardableResult
+    static func checkLayout(menuPages: Int) throws -> Layout {
+        guard menuPages >= 0, menuPages <= 1000 else {
+            throw WriteError.tooManyEntries("\(menuPages) menu pages (1000 at most)")
+        }
+        return try plan(paths: menuDiscPaths(menuPages: menuPages))
+    }
 
     /// Writes `folder` (holding BDMV/ and CERTIFICATE/) as a UDF 2.50 image,
     /// in the order tsMuxeR writes a disc: its directory set, the streams,
     /// index and movie objects, clip information, playlists, then anything
     /// else in the folder.
+    ///
+    /// The folder must be a readable disc with BDMV/index.bdmv. The image is
+    /// written to a hidden temporary file beside `iso` and renamed over it
+    /// only when complete; any file in the folder that is the destination
+    /// (by path or by file identity, through symlinks) is left out.
     static func writeImage(of folder: URL, to iso: URL, label: String,
                            header: Header = .normal(),
                            isCancelled: @escaping () -> Bool = { false }) throws {
         let fm = FileManager.default
-        var files: [String] = []
-        if let walker = fm.enumerator(atPath: folder.path) {
-            for case let rel as String in walker {
-                var isDir: ObjCBool = false
-                if fm.fileExists(atPath: folder.appendingPathComponent(rel).path, isDirectory: &isDir), !isDir.boolValue {
-                    if !rel.hasPrefix(".") && !rel.contains("/.") { files.append(rel) }
-                }
-            }
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: folder.path, isDirectory: &isDir) else {
+            throw WriteError.source("\(folder.path) doesn't exist")
         }
+        guard isDir.boolValue else { throw WriteError.source("\(folder.path) isn't a folder") }
+        guard fm.isReadableFile(atPath: folder.path) else { throw WriteError.source("can't read \(folder.path)") }
+        let index = folder.appendingPathComponent("BDMV/index.bdmv")
+        var indexIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: index.path, isDirectory: &indexIsDir), !indexIsDir.boolValue,
+              fm.isReadableFile(atPath: index.path) else {
+            throw WriteError.source("\(folder.path) has no readable BDMV/index.bdmv, so it isn't a Blu-ray folder")
+        }
+
+        let destination = FileIdentity(iso)
+        var enumerationError: Error?
+        guard let walker = fm.enumerator(at: folder, includingPropertiesForKeys: nil, options: [],
+                                         errorHandler: { _, error in enumerationError = error; return false }) else {
+            throw WriteError.source("can't list \(folder.path)")
+        }
+        let base = folder.standardizedFileURL.path
+        var files: [String] = []
+        for case let url as URL in walker {
+            let full = url.standardizedFileURL.path
+            guard full.hasPrefix(base + "/") else { continue }
+            let rel = String(full.dropFirst(base.count + 1))
+            guard !rel.hasPrefix("."), !rel.contains("/.") else { continue }
+            var dir: ObjCBool = false
+            guard fm.fileExists(atPath: full, isDirectory: &dir), !dir.boolValue else { continue }
+            if destination.matches(URL(fileURLWithPath: full)) { continue }
+            files.append(rel)
+        }
+        if let enumerationError {
+            throw WriteError.source("can't list \(folder.path): \(enumerationError.localizedDescription)")
+        }
+
         func rank(_ path: String) -> (Int, String) {
             let name = (path as NSString).lastPathComponent
             let backup = path.contains("BACKUP/") ? 1 : 0
@@ -139,24 +259,78 @@ final class UDFImageWriter {
         let total = files.reduce(Int64(0)) {
             $0 + ((try? fm.attributesOfItem(atPath: folder.appendingPathComponent($1).path)[.size] as? Int64) ?? 0)
         }
+        let layout = try plan(paths: files)
 
-        let writer = try UDFImageWriter(url: iso, header: header, diskSize: total)
-        writer.isCancelled = isCancelled
-        writer.setVolumeLabel(label)
-        for dir in ["BDMV/META", "BDMV/BDJO", "BDMV/JAR", "BDMV/BACKUP/BDJO", "BDMV/BACKUP/JAR",
-                    "CERTIFICATE/BACKUP", "BDMV/AUXDATA", "BDMV/CLIPINF", "BDMV/PLAYLIST", "BDMV/STREAM",
-                    "BDMV/BACKUP/CLIPINF", "BDMV/BACKUP/PLAYLIST"] {
-            writer.createDirectory(dir)
+        let temp = iso.deletingLastPathComponent()
+            .appendingPathComponent(".\(iso.lastPathComponent).partial-\(UUID().uuidString)")
+        do {
+            let writer = try UDFImageWriter(url: temp, header: header, diskSize: total,
+                                            metadataSectors: layout.metadataSectors,
+                                            mappingBytes: layout.mappingBytes)
+            writer.isCancelled = isCancelled
+            writer.setVolumeLabel(label)
+            for dir in standardDirectories { writer.createDirectory(dir) }
+            for rel in files {
+                try writer.addFile(rel, from: folder.appendingPathComponent(rel))
+            }
+            try writer.close()
+            if fm.fileExists(atPath: iso.path) {
+                _ = try fm.replaceItemAt(iso, withItemAt: temp)
+            } else {
+                try fm.moveItem(at: temp, to: iso)
+            }
+        } catch {
+            try? fm.removeItem(at: temp)
+            throw error
         }
-        for rel in files {
-            try writer.addFile(rel, from: folder.appendingPathComponent(rel))
+    }
+
+    /// The destination image, recognised by canonical path (symlinks
+    /// resolved) or, once it exists, by device and inode.
+    private struct FileIdentity {
+        let canonicalPath: String
+        let device: dev_t?
+        let inode: ino_t?
+
+        init(_ url: URL) {
+            canonicalPath = Self.canonical(url)
+            var st = stat()
+            if stat(url.path, &st) == 0 {
+                device = st.st_dev; inode = st.st_ino
+            } else {
+                device = nil; inode = nil
+            }
         }
-        try writer.close()
+
+        func matches(_ url: URL) -> Bool {
+            if Self.canonical(url) == canonicalPath { return true }
+            guard let device, let inode else { return false }
+            var st = stat()
+            return stat(url.path, &st) == 0 && st.st_dev == device && st.st_ino == inode
+        }
+
+        /// realpath of the file, or of its folder plus the name if the file
+        /// doesn't exist (yet).
+        static func canonical(_ url: URL) -> String {
+            if let full = realpath(url.path, nil) {
+                defer { free(full) }
+                return String(cString: full)
+            }
+            let parent = url.deletingLastPathComponent().path
+            if let dir = realpath(parent, nil) {
+                defer { free(dir) }
+                return String(cString: dir) + "/" + url.lastPathComponent
+            }
+            return url.standardizedFileURL.path
+        }
     }
 
     // MARK: - Open
 
-    init(url: URL, header: Header, diskSize: Int64) throws {
+    /// `metadataSectors` and `mappingBytes` come from `plan(paths:)`; the
+    /// metadata partition gets at least that much, and never less than
+    /// tsMuxeR's size for the same disc.
+    init(url: URL, header: Header, diskSize: Int64, metadataSectors: Int = 0, mappingBytes: Int = 0) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
         guard fm.createFile(atPath: url.path, contents: nil),
@@ -169,6 +343,8 @@ final class UDFImageWriter {
             let blocks = 2 + Int((diskSize + Self.metaBlockPerData - 1) / Self.metaBlockPerData)
             metadataLength = Self.allocBlockSize * blocks
         }
+        metadataLength = max(metadataLength, Self.roundUp(metadataSectors * Self.sectorSize, Self.allocBlockSize))
+        self.mappingBytes = mappingBytes
         root = Entry(parent: nil, objectID: 0, type: .directory)
         systemStream = Entry(parent: nil, objectID: 0, type: .systemStreamDirectory)
         mappingFile = Entry(parent: systemStream, objectID: 0, type: .file)
@@ -187,8 +363,11 @@ final class UDFImageWriter {
         let required = Self.metadataStartAddr + metadataLength / Self.sectorSize
         let current = try sectorPosition()
         if required > current { try writeZeroSectors(required - current) }
-        try writeZeroSectors(Self.allocBlockSize / Self.sectorSize)   // mapping file
+        mappingReserve = max(Self.allocBlockSize, Self.roundUp(mappingBytes, Self.allocBlockSize))
+        try writeZeroSectors(mappingReserve / Self.sectorSize)        // mapping file
     }
+
+    static func roundUp(_ n: Int, _ to: Int) -> Int { (n + to - 1) / to * to }
 
     func setVolumeLabel(_ label: String) {
         volumeLabel = label.isEmpty ? "Blu-Ray" : label
@@ -212,14 +391,16 @@ final class UDFImageWriter {
         return entry
     }
 
-    private func takeObjectID() -> UInt8 {
+    /// UDF unique IDs. tsMuxeR keeps them in a byte, which caps a disc at
+    /// about 240 files and folders; they're 32-bit here (identical output
+    /// below 256).
+    private func takeObjectID() -> UInt32 {
         defer { nextObjectID += 1 }
-        return UInt8(truncatingIfNeeded: nextObjectID)
+        return UInt32(nextObjectID)
     }
 
     /// Copies `source` into the image at `path` ("BDMV/STREAM/00000.m2ts").
     func addFile(_ path: String, from source: URL) throws {
-        guard nextObjectID < 256 else { throw WriteError.tooManyEntries("more than 240 files and folders") }
         let parts = path.split(separator: "/").map(String.init)
         let dir = createDirectory(parts.dropLast().joined(separator: "/"))
         let type: FileType = path.hasSuffix(".m2ts") || path.hasSuffix(".ssif") ? .realtimeFile : .file
@@ -305,12 +486,15 @@ final class UDFImageWriter {
     }
 
     private func allocateMetadata() throws {
-        systemStreamLBN = allocate(root, sector: 2)     // 0: file set descriptor, 1: terminator
-        _ = allocate(systemStream, sector: systemStreamLBN)
-        if systemStreamLBN + 3 > metadataLength / Self.sectorSize {
-            throw WriteError.tooManyEntries("not enough metadata space")
+        systemStreamLBN = try allocate(root, sector: 2) // 0: file set descriptor, 1: terminator
+        let end = try allocate(systemStream, sector: systemStreamLBN)
+        if end > metadataLength / Self.sectorSize {
+            throw WriteError.tooManyEntries("not enough metadata space (\(end) sectors)")
         }
         try seek(Int64(Self.metadataStartAddr * Self.sectorSize + metadataLength))
+        guard 48 + 16 * mapping.count <= mappingReserve else {
+            throw WriteError.tooManyEntries("\(mapping.count) files and folders overflow the unique ID map")
+        }
         var w = LEWriter(size: 32 + 16 + 16 * mapping.count)
         w.charSpec(header.implementationID, 32)
         w.u32(0)
@@ -321,24 +505,26 @@ final class UDFImageWriter {
             w.u16(1); w.u16(1)
         }
         var pending = Data()
-        try write(mappingFile, Data(w.buffer), pending: &pending)
+        try write(mappingFile, Data(try w.checked()), pending: &pending)
         try closeFile(mappingFile, pending: pending)
     }
 
-    private func allocate(_ entity: Entry, sector: Int) -> Int {
+    private func allocate(_ entity: Entry, sector: Int) throws -> Int {
         if entity.type.isFile && entity.objectID != 0 {
             totalFiles += 1
         } else if entity.type == .directory {
             totalDirectories += 1
         }
         entity.sector = sector
-        entity.sectorsUsed = entity.type.isFile ? 1 : 2
+        entity.sectorsUsed = entity.type.isFile
+            ? 1
+            : 1 + Self.sectors(forDirectoryBytes: try Self.directoryBytes(entity.files.map(\.name) + entity.subdirectories.map(\.name)))
         var next = sector + entity.sectorsUsed
         if entity.objectID != 0 {
             mapping[entity.objectID] = (entity.parent?.sector ?? 0, entity.sector)
         }
-        for f in entity.files { next = allocate(f, sector: next) }
-        for d in entity.subdirectories { next = allocate(d, sector: next) }
+        for f in entity.files { next = try allocate(f, sector: next) }
+        for d in entity.subdirectories { next = try allocate(d, sector: next) }
         return next
     }
 
@@ -367,9 +553,13 @@ final class UDFImageWriter {
         for d in entry.subdirectories { try writeEntity(d) }
     }
 
-    /// The directory's file entry, then one sector of file identifiers.
+    /// The directory's file entry, then its file identifiers in as many
+    /// sectors as they need. An identifier may run across a sector boundary;
+    /// its tag records the sector it starts in.
     private func writeDirectory(_ dir: Entry) throws {
-        var w = LEWriter(size: Self.sectorSize)
+        let children = dir.files + dir.subdirectories
+        let dataBytes = try Self.directoryBytes(children.map(\.name))
+        var w = LEWriter(size: Self.sectors(forDirectoryBytes: dataBytes) * Self.sectorSize)
         let here = try absoluteSector()
         // Parent entry.
         let tag = w.beginTag(257, location: here + 1)
@@ -380,34 +570,33 @@ final class UDFImageWriter {
         w.u16(0)
         w.u16(0)
         w.closeTag(tag)
-        for child in dir.files + dir.subdirectories {
-            let t = w.beginTag(257, location: here + 1)
+        for child in children {
+            let t = w.beginTag(257, location: here + 1 + w.position / Self.sectorSize)
             w.u16(1)
             w.u8(!child.type.isFile ? 0x02 : (dir.objectID == 0 ? 0x10 : 0))
-            let name = Self.dstring(child.name, fieldLength: child.name.utf8.count + 2)
-            w.u8(name.count - 1)
-            w.longAD(0x800, UInt32(child.sector), 1, UInt32(child.objectID))
+            let identifier = try Self.fileIdentifier(child.name)
+            w.u8(UInt8(identifier.count))
+            w.longAD(0x800, UInt32(child.sector), 1, child.objectID)
             w.u16(0)
-            // tsMuxeR writes the whole d-string, steps back over its length
-            // byte and pads; when no padding is needed the byte stays in
-            // the buffer past the descriptor. Kept for identical output.
-            w.bytes(name)
-            w.seek(w.position - 1)
+            w.bytes(identifier)
+            // tsMuxeR writes a d-string here and steps back over its length
+            // byte; when no padding follows, that byte is left in the buffer
+            // past the descriptor. Kept so the output stays identical.
+            if w.position % 4 == 0 { w.poke(w.position, UInt8(identifier.count)) }
             w.pad(to: 4)
             w.closeTag(t)
         }
-        guard w.position < Self.sectorSize else {
-            throw WriteError.tooManyEntries("folder \(dir.name) has too many entries for one sector")
-        }
+        guard w.position == dataBytes else { throw WriteError.overrun("folder \(dir.name)") }
+        guard dir.subdirectories.count < 0xFFFF else { throw WriteError.tooManyEntries("folder \(dir.name)") }
         try writeExtendedFileEntry(namedStream: false, objectID: dir.objectID, type: dir.type,
-                                   length: Int64(w.position), position: dir.sector + 1,
+                                   length: Int64(dataBytes), position: dir.sector + 1,
                                    linkCount: UInt16(dir.subdirectories.count + 1))
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     // MARK: - Descriptors
 
-    private func writeExtendedFileEntry(namedStream: Bool, objectID: UInt8, type: FileType, length: Int64,
+    private func writeExtendedFileEntry(namedStream: Bool, objectID: UInt32, type: FileType, length: Int64,
                                         position: Int, linkCount: UInt16,
                                         extents: [(lbn: Int, size: Int64)]? = nil) throws {
         var w = LEWriter(size: Self.sectorSize)
@@ -433,7 +622,7 @@ final class UDFImageWriter {
         w.seek(169)
         w.raw(header.implementationID)
         w.seek(200)
-        w.u8(objectID)
+        w.u32(objectID)
         w.seek(212)
         if !type.isFile {
             w.u32(8)
@@ -449,7 +638,7 @@ final class UDFImageWriter {
             w.longAD(UInt32(truncatingIfNeeded: length), UInt32(position), 0, 0)
             w.closeTag(tag, length: 232)
         }
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writeFileSetDescriptor() throws {
@@ -464,11 +653,11 @@ final class UDFImageWriter {
         w.zeros(64)                                     // copyright, abstract
         w.longAD(0x800, 2, 1, 0)                        // root directory
         w.udfString("*OSTA UDF Compliant", 32)
-        w.buffer[442] = 0x03                            // hard and soft write-protect
+        w.poke(442, 0x03)                            // hard and soft write-protect
         w.longAD(0, 0, 0, 0)                            // next extent
         w.longAD(0x800, UInt32(systemStreamLBN), 1, 0)  // system stream directory
         w.closeTag(tag, length: 512)
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writeDescriptors() throws {
@@ -515,9 +704,9 @@ final class UDFImageWriter {
         w.seek(376); w.timestamp(header.time)
         w.seek(389); w.raw(header.implementationID)
         w.seek(420); w.raw(header.applicationID)
-        w.buffer[488] = 1
+        w.poke(488, 1)
         w.closeTag(tag, length: 512)
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writeImplementationUseDescriptor() throws {
@@ -530,7 +719,7 @@ final class UDFImageWriter {
         w.seek(0x161); w.raw(header.implementationID)
         w.seek(0x180); w.raw(header.applicationID)
         w.closeTag(tag, length: 512)
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writePartitionDescriptor() throws {
@@ -545,7 +734,7 @@ final class UDFImageWriter {
         w.seek(0xC5); w.raw(header.implementationID)
         w.seek(0xE4); w.raw(header.applicationID)
         w.closeTag(tag, length: 512)
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writeLogicalVolumeDescriptor() throws {
@@ -556,11 +745,11 @@ final class UDFImageWriter {
         w.seek(84); w.bytes(Self.dstring(volumeLabel, fieldLength: 128))
         w.u32(UInt32(Self.sectorSize))
         w.udfString("*OSTA UDF Compliant", 32)
-        w.buffer[242] = 0x03
-        w.buffer[249] = 0x10
-        w.buffer[256] = 0x01
-        w.buffer[264] = 0x46
-        w.buffer[268] = 0x02
+        w.poke(242, 0x03)
+        w.poke(249, 0x10)
+        w.poke(256, 0x01)
+        w.poke(264, 0x46)
+        w.poke(268, 0x02)
         w.seek(273); w.raw(header.implementationID)
         w.seek(304); w.raw(header.applicationID)
         w.seek(432); w.u32(0x8000); w.u32(0x40)
@@ -576,7 +765,7 @@ final class UDFImageWriter {
         w.u16(0x20); w.u16(0); w.u16(0x20)
         w.u8(1)
         w.closeTag(tag, length: 510)
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writeUnallocatedSpaceDescriptor() throws {
@@ -584,14 +773,14 @@ final class UDFImageWriter {
         let tag = w.beginTag(7, location: try absoluteSector())
         w.u32(4)
         w.closeTag(tag, length: 24)
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writeTerminatingDescriptor() throws {
         var w = LEWriter(size: Self.sectorSize)
         let tag = w.beginTag(8, location: try absoluteSector())
         w.closeTag(tag, length: 512)
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writeLogicalVolumeIntegrity() throws {
@@ -599,7 +788,7 @@ final class UDFImageWriter {
         let tag = w.beginTag(9, location: try absoluteSector())
         w.timestamp(header.time)
         w.u32(1); w.u32(0); w.u32(0)
-        w.u32(UInt32(nextObjectID & 0xFF)); w.u32(0)
+        w.u32(UInt32(truncatingIfNeeded: nextObjectID)); w.u32(0)
         w.seek(72)
         w.u32(2)
         w.u32(UInt32(46 + header.applicationID.utf8.count))
@@ -612,7 +801,7 @@ final class UDFImageWriter {
         w.u16(0x0250); w.u16(0x0250); w.u16(0x0250)
         w.raw(header.applicationID)
         w.closeTag(tag, length: 142 + header.applicationID.utf8.count)
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writeAnchor(_ reserveLocation: Int) throws {
@@ -620,7 +809,7 @@ final class UDFImageWriter {
         let tag = w.beginTag(2, location: try absoluteSector())
         w.u32(0x8000); w.u32(0x20); w.u32(0x8000); w.u32(UInt32(reserveLocation))
         w.closeTag(tag, length: 512)
-        try handle.write(contentsOf: Data(w.buffer))
+        try handle.write(contentsOf: Data(try w.checked()))
     }
 
     private func writeVolumeStructure(_ id: String) throws {
@@ -651,6 +840,32 @@ final class UDFImageWriter {
 
     // MARK: - Strings
 
+    /// A file identifier as stored in a File Identifier Descriptor: OSTA
+    /// compression id 8 and Latin-1, or 16 and UTF-16BE, with no padding
+    /// or length byte. Its length field is one byte, so 255 at most.
+    static func fileIdentifier(_ name: String) throws -> [UInt8] {
+        guard !name.isEmpty else { throw WriteError.badName(name, "it has no name") }
+        var out: [UInt8]
+        if name.unicodeScalars.allSatisfy({ $0.value < 0x100 }) {
+            out = [8] + name.unicodeScalars.map { UInt8($0.value) }
+        } else {
+            out = [16]
+            for unit in name.utf16 { out += [UInt8(unit >> 8), UInt8(unit & 0xFF)] }
+        }
+        guard out.count <= 255 else {
+            throw WriteError.badName(name, "UDF names hold 254 Latin-1 or 127 other characters")
+        }
+        return out
+    }
+
+    /// Bytes of a directory's identifiers: the 40-byte parent entry, then
+    /// 38 bytes plus the identifier for each child, padded to 4.
+    static func directoryBytes(_ names: [String]) throws -> Int {
+        try names.reduce(40) { $0 + roundUp(38 + (try fileIdentifier($1)).count, 4) }
+    }
+
+    static func sectors(forDirectoryBytes n: Int) -> Int { max(1, (n + sectorSize - 1) / sectorSize) }
+
     /// OSTA compressed Unicode d-string: compression id 8 (Latin-1) or 16
     /// (UTF-16BE), the characters, zero padding, then the length byte.
     static func dstring(_ s: String, fieldLength: Int) -> [UInt8] {
@@ -671,38 +886,52 @@ final class UDFImageWriter {
     }
 }
 
-/// Little-endian sector builder for UDF descriptors.
+/// Little-endian sector builder for UDF descriptors. Writes past the end
+/// are dropped and remembered; `checked()` then throws instead of the
+/// writer trapping on an index out of range.
 private struct LEWriter {
-    var buffer: [UInt8]
+    private(set) var buffer: [UInt8]
     var position = 0
+    private(set) var overran = false
 
     init(size: Int) { buffer = [UInt8](repeating: 0, count: size) }
 
+    /// The bytes, or an error if anything was written past the end.
+    func checked() throws -> [UInt8] {
+        if overran { throw UDFImageWriter.WriteError.overrun("descriptor") }
+        return buffer
+    }
+
+    /// Stores a byte at an absolute offset without moving the cursor.
+    mutating func poke(_ at: Int, _ v: UInt8) {
+        if at >= 0 && at < buffer.count { buffer[at] = v } else { overran = true }
+    }
+
     mutating func seek(_ at: Int) { position = at }
-    mutating func u8(_ v: Int) { buffer[position] = UInt8(truncatingIfNeeded: v); position += 1 }
-    mutating func u8(_ v: UInt8) { buffer[position] = v; position += 1 }
+    mutating func u8(_ v: Int) { poke(position, UInt8(truncatingIfNeeded: v)); position += 1 }
+    mutating func u8(_ v: UInt8) { poke(position, v); position += 1 }
     mutating func u16(_ v: UInt16) { u8(Int(v & 0xFF)); u8(Int(v >> 8)) }
     mutating func u32(_ v: UInt32) { for i in 0..<4 { u8(Int((v >> (8 * UInt32(i))) & 0xFF)) } }
     mutating func u64(_ v: UInt64) { for i in 0..<8 { u8(Int((v >> (8 * UInt64(i))) & 0xFF)) } }
-    mutating func zeros(_ n: Int) { position += n }
+    mutating func zeros(_ n: Int) { position += n; if position > buffer.count { overran = true } }
     mutating func bytes(_ b: [UInt8]) { for x in b { u8(x) } }
 
     /// C string copy without moving the cursor's logical field (strcpy).
     mutating func raw(_ s: String) {
-        for (i, c) in s.utf8.enumerated() { buffer[position + i] = c }
+        for (i, c) in s.utf8.enumerated() { poke(position + i, c) }
     }
 
     /// charspec: type 0 (CS0) then the name, `length` bytes in all.
     mutating func charSpec(_ s: String, _ length: Int) {
-        for (i, c) in s.utf8.enumerated() { buffer[position + 1 + i] = c }
+        for (i, c) in s.utf8.enumerated() { poke(position + 1 + i, c) }
         position += length
     }
 
     /// regid with the UDF 2.50 revision suffix.
     mutating func udfString(_ s: String, _ length: Int) {
-        for (i, c) in s.utf8.enumerated() { buffer[position + 1 + i] = c }
-        buffer[position + length - 8] = 0x50
-        buffer[position + length - 7] = 0x02
+        for (i, c) in s.utf8.enumerated() { poke(position + 1 + i, c) }
+        poke(position + length - 8, 0x50)
+        poke(position + length - 7, 0x02)
         position += length
     }
 
@@ -736,6 +965,7 @@ private struct LEWriter {
     /// whole descriptor; nil means up to the cursor.
     mutating func closeTag(_ at: Int, length: Int? = nil) {
         let len = length ?? (position - at)
+        guard at >= 0, len >= 16, at + len <= buffer.count else { overran = true; return }
         let crc = Self.crc16(buffer[(at + 16)..<(at + len)])
         buffer[at + 8] = UInt8(crc & 0xFF); buffer[at + 9] = UInt8(crc >> 8)
         buffer[at + 10] = UInt8((len - 16) & 0xFF); buffer[at + 11] = UInt8((len - 16) >> 8)
