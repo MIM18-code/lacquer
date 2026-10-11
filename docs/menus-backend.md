@@ -32,6 +32,10 @@ The film object turns PG stream 1 on or off from GPR2. It plays 00000.mpls from 
 
 Chapters now sit on IDR frames. Chapter times snap to frame starts, the film encode forces a keyframe at each one, and the mark is rounded up to the millisecond. Before, a chapter at 20 s started at the previous GOP, 19.0 s.
 
+### Quick or paused presses
+
+A player runs a button's commands on its next read of the disc. A second activation before that replaces them (libbluray's `hdmv_vm_set_object`). VLC doesn't read while paused, and it handles quick key presses between reads. So in VLC 3.0.21, Subtitles Off followed by Play started the film with subtitles still on. This was reproduced with libvlc and with the VLC binary's rc interface, paused and unpaused. Every button's activated state is now a two-frame, play-once animation (objects 4i+2 and 4i+3, the same image). libbluray ignores the remote while one runs, so the second press is dropped, not the first. The lock ends when the page changes or the button is re-selected, which is after its commands ran. Re-tested in VLC: Off then quick Play, and Off then Play while paused, both play with subtitles hidden. `menu_check` covers this case with a rapid check.
+
 ## Contract notes for the designer
 
 - `setSubtitles` buttons are rejected when the film has no subtitle track, and `playChapter(n)` when n is past the last chapter.

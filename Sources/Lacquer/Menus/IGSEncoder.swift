@@ -122,8 +122,17 @@ struct IGDisplaySet: Sendable {
 /// Builds the IG display set for one menu page.
 ///
 /// Every button lives in its own button overlap group (BOG), so each draws
-/// independently. Button ids are their index in `MenuPage.buttons`; each
-/// button state is one object. All of a page's overlays share one palette
+/// independently. Button ids are their index in `MenuPage.buttons`. Each
+/// button has four objects: normal (4i), selected (4i+1), and the activated
+/// image twice (4i+2, 4i+3) as a two-frame, play-once animation.
+///
+/// That animation is a guard. A player runs a button's commands on its next
+/// read of the disc, and a second activation before then replaces them
+/// (libbluray's `hdmv_vm_set_object`): in VLC, pressing Subtitles Off and
+/// then Play while paused, or quickly, played the film with subtitles on.
+/// While an activated animation runs, libbluray ignores the remote, so the
+/// second press is dropped instead of the first. The lock ends when the
+/// page changes or the button is re-selected, i.e. once its commands ran. All of a page's overlays share one palette
 /// of up to 255 colours plus transparent entry 0.
 enum IGSEncoder {
     struct Button {
@@ -203,7 +212,7 @@ enum IGSEncoder {
         c.zeros(8)                  // UO mask: allow everything
         c.u8(0); c.u8(0)            // in effects: no windows, no effects
         c.u8(0); c.u8(0)            // out effects
-        c.u8(0)                     // animation_frame_rate_code
+        c.u8(1)                     // animation_frame_rate_code: every frame
         c.u16(defaultButton ?? 0xFFFF)  // default_selected_button_id_ref
         c.u16(0xFFFF)               // default_activated_button_id_ref: none
         c.u8(0)                     // palette_id_ref
@@ -216,9 +225,9 @@ enum IGSEncoder {
             c.u8(0)                 // auto_action_flag 0
             c.u16(Int(b.rect.minX.rounded())); c.u16(Int(b.rect.minY.rounded()))
             c.u16(b.up); c.u16(b.down); c.u16(b.left); c.u16(b.right)
-            c.u16(3 * i); c.u16(3 * i); c.u8(0)                     // normal
-            c.u8(0xFF); c.u16(3 * i + 1); c.u16(3 * i + 1); c.u8(0) // selected, no sound
-            c.u8(0xFF); c.u16(3 * i + 2); c.u16(3 * i + 2)          // activated
+            c.u16(4 * i); c.u16(4 * i); c.u8(0)                     // normal
+            c.u8(0xFF); c.u16(4 * i + 1); c.u16(4 * i + 1); c.u8(0) // selected, no sound
+            c.u8(0xFF); c.u16(4 * i + 2); c.u16(4 * i + 3)          // activated, two frames
             c.u16(b.commands.count)
             for cmd in b.commands { c.append(cmd.bytes) }
         }
@@ -226,8 +235,8 @@ enum IGSEncoder {
 
         guard c.count <= maxSegmentBody else { throw EncodeError.compositionTooLarge(c.count) }
 
-        // ---- Palette and objects (ids 3i, 3i+1, 3i+2 for normal, selected,
-        // activated), with fewer colours until the set fits the buffer.
+        // ---- Palette and objects, with fewer colours until the set fits
+        // the buffer.
         var lastSize = 0
         for colours in paletteSteps {
             var palette = PaletteQuantizer.palette(for: images, maxColors: colours)
@@ -237,7 +246,11 @@ enum IGSEncoder {
                 let indices = palette.indices(for: image)
                 hashes.append(fnv1a(indices))
                 let rle = RLE.encode(indices, width: image.width, height: image.height)
-                objectSegments += objectDefinition(id: n, width: image.width, height: image.height, rle: rle)
+                let button = n / 3, state = n % 3
+                objectSegments += objectDefinition(id: 4 * button + state, width: image.width, height: image.height, rle: rle)
+                if state == 2 {
+                    objectSegments += objectDefinition(id: 4 * button + 3, width: image.width, height: image.height, rle: rle)
+                }
             }
             var segments = [segment(0x18, c.bytes, .composition)]
             segments.append(segment(0x14, palette.definition(), .palette))
