@@ -132,6 +132,29 @@ if run --mode m2ts --input "$FX/covered.mp4"; then
 fi
 for m in m2ts bdmv iso; do run --mode "$m" --input "$FX/short.mov" && check "3 s clip as $m" ok ok; done
 
+echo "== menus: demo menu on a BDMV folder and a UDF 2.50 ISO"
+"$FF" "${q[@]}" -f lavfi -i testsrc2=s=1920x1080:r=24000/1001:d=12 -f lavfi -i sine=f=440:d=12 \
+    -ac 2 -c:v libx264 -preset ultrafast -c:a aac -shortest "$FX/menufilm.mp4"
+printf '1\n00:00:01,000 --> 00:00:03,000\nHello\n' > "$FX/menufilm.srt"
+# libbluray harness (Homebrew libbluray); skipped when it can't be built.
+MENU_CHECK="$PWD/Scripts/menu-check/menu_check"
+[ -x "$MENU_CHECK" ] || Scripts/menu-check/build.sh >/dev/null 2>&1 || echo "  (menu_check not built: brew install libbluray to run it)"
+for mode in bdmv iso; do
+    run --mode "$mode" --input "$FX/menufilm.mp4" --chapters "00:00,00:05" --srt "$FX/menufilm.srt" --menu-demo || continue
+    if [ "$mode" = bdmv ]; then disc="$OUT/menufilm_BluRay"; d="$disc"; else
+        disc="$OUT/menufilm_BluRay_2.iso"
+        check "menu ISO UDF 2.50 anchor" "$(LC_ALL=C grep -a -c NSR03 "$disc" | awk '{print ($1 > 0) ? "NSR03" : "none"}')" "NSR03"
+        d="$(mount_iso "$disc")"
+    fi
+    check "$mode menu clips" "$(ls "$d/BDMV/STREAM" | tr '\n' ' ')" "00000.m2ts 01000.m2ts 01001.m2ts "
+    check "$mode menu stream" "$(probe "$d/BDMV/STREAM/01000.m2ts" v:0 r_frame_rate)" "24000/1001"
+    check "$mode film keeps subtitles" "$(probe "$d/BDMV/STREAM/00000.m2ts" s:0 codec_name)" "hdmv_pgs_subtitle"
+    check "$mode backup copies" "$(cmp -s "$d/BDMV/index.bdmv" "$d/BDMV/BACKUP/index.bdmv" && echo same)" "same"
+    if [ -x "$MENU_CHECK" ]; then
+        check "$mode libbluray menu check" "$("$MENU_CHECK" "$disc" --chapters 0,5 --subtitles | tail -1)" "ALL PASSED: 0 check(s) failed"
+    fi
+done
+
 echo "== too long for the disc is refused before encoding"
 # 60 hours at 1 fps: past what BD-25 holds even at the 1 Mbps floor.
 "$FF" "${q[@]}" -f lavfi -i color=c=black:s=64x64:r=1:d=216000 -c:v libx264 -preset ultrafast "$FX/marathon.mkv"
