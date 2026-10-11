@@ -21,14 +21,16 @@ struct MenuDesignerView: View {
 
     /// `hdrTransfer`: the film's PQ/HLG transfer when its stills need
     /// tonemapping (only pass it when the ffmpeg can tonemap).
+    /// `deinterlace`: true when the master is interlaced, so stills aren't combed.
     init(template: Binding<MenuTemplate>, film: URL, chapters: [Double], ffmpeg: URL, hasSubtitles: Bool,
-         hdrTransfer: String? = nil) {
+         hdrTransfer: String? = nil, deinterlace: Bool = false) {
         _template = template
         self.film = film
         self.chapters = chapters
         self.ffmpeg = ffmpeg
         self.hasSubtitles = hasSubtitles
-        _model = StateObject(wrappedValue: MenuDesignerModel(ffmpeg: ffmpeg, hdrTransfer: hdrTransfer))
+        _model = StateObject(wrappedValue: MenuDesignerModel(ffmpeg: ffmpeg, hdrTransfer: hdrTransfer,
+                                                                    deinterlace: deinterlace))
     }
 
     private var request: RenderRequest {
@@ -457,6 +459,8 @@ final class MenuDesignerModel: ObservableObject {
     private var cache: [Int: MenuPage] = [:]
     private var cacheKey: CacheKey?
     private var generation = 0
+    /// Pause before rendering; tests shorten it.
+    var debounceNanoseconds: UInt64 = 250_000_000
     private var displayedIndex = -1
 
     private struct CacheKey: Equatable {
@@ -465,13 +469,25 @@ final class MenuDesignerModel: ObservableObject {
         var hasSubtitles: Bool
     }
 
-    init(ffmpeg: URL, hdrTransfer: String? = nil) {
-        renderer = MenuRenderer(ffmpeg: ffmpeg, hdrTransfer: hdrTransfer)
+    /// Renders one page: (index, template, film, chapters, hasSubtitles). Tests
+    /// pass their own to drive the model without ffmpeg.
+    typealias PageRenderer = @Sendable (Int, MenuTemplate, URL, [Double], Bool) async throws -> MenuPage
+    private let pageRenderer: PageRenderer?
+
+    init(ffmpeg: URL, hdrTransfer: String? = nil, deinterlace: Bool = false, pageRenderer: PageRenderer? = nil) {
+        renderer = MenuRenderer(ffmpeg: ffmpeg, hdrTransfer: hdrTransfer, deinterlace: deinterlace)
+        self.pageRenderer = pageRenderer
     }
 
     // MARK: Rendering
 
     func refresh(template: MenuTemplate, film: URL, chapters: [Double], hasSubtitles: Bool, page requested: Int) async {
+        // Each request supersedes the one before it, cached or not. Only the
+        // newest may clear the busy flag, and it does on every way out.
+        generation += 1
+        let mine = generation
+        defer { if mine == generation { isRendering = false } }
+
         let key = CacheKey(template: template, chapters: chapters, hasSubtitles: hasSubtitles)
         if key != cacheKey {
             cacheKey = key
@@ -484,28 +500,32 @@ final class MenuDesignerModel: ObservableObject {
         if index != requested { pageIndex = index }
 
         if let hit = cache[index] {
+            isRendering = false   // retires a superseded render's spinner
             show(hit, index: index)
             return
         }
 
         // Let the controls settle (a dragged slider fires constantly).
-        do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
-        generation += 1
-        let mine = generation
+        do { try await Task.sleep(nanoseconds: debounceNanoseconds) } catch { return }
+        guard mine == generation else { return }
         isRendering = true
         do {
-            let rendered = try await renderer.renderPage(index, template: template, film: film,
+            let rendered: MenuPage
+            if let pageRenderer {
+                rendered = try await pageRenderer(index, template, film, chapters, hasSubtitles)
+            } else {
+                rendered = try await renderer.renderPage(index, template: template, film: film,
                                                          chapters: chapters, hasSubtitles: hasSubtitles)
-            if Task.isCancelled { return }
-            cache[index] = rendered
+            }
+            if Task.isCancelled || mine != generation { return }
+            if key == cacheKey { cache[index] = rendered }
             errorMessage = nil
             show(rendered, index: index)
         } catch is CancellationError {
             // A newer request replaced this one.
         } catch {
-            if !Task.isCancelled { errorMessage = error.localizedDescription }
+            if !Task.isCancelled && mine == generation { errorMessage = error.localizedDescription }
         }
-        if mine == generation { isRendering = false }
     }
 
     private func show(_ page: MenuPage, index: Int) {

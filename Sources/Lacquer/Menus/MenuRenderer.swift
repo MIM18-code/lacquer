@@ -24,14 +24,18 @@ actor FrameStore {
     /// The film's HDR transfer ("smpte2084", "arib-std-b67") when stills
     /// need tonemapping to SDR, or nil.
     private let hdrTransfer: String?
+    /// True for interlaced masters: stills are deinterlaced so moving edges
+    /// don't carry both fields woven together.
+    private let deinterlace: Bool
     private var cache: [String: CGImage] = [:]
     private var order: [String] = []
     private var bytes = 0
     private let byteLimit = 240_000_000
 
-    init(ffmpeg: URL, hdrTransfer: String? = nil) {
+    init(ffmpeg: URL, hdrTransfer: String? = nil, deinterlace: Bool = false) {
         self.ffmpeg = ffmpeg
         self.hdrTransfer = hdrTransfer
+        self.deinterlace = deinterlace
     }
 
     /// A frame scaled to fit within `box`, keeping the film's shape (pixel
@@ -44,7 +48,8 @@ actor FrameStore {
             order.append(key)
             return hit
         }
-        let image = try await Self.grab(ffmpeg: ffmpeg, film: film, at: t, box: box, hdrTransfer: hdrTransfer)
+        let image = try await Self.grab(ffmpeg: ffmpeg, film: film, at: t, box: box, hdrTransfer: hdrTransfer,
+                                    deinterlace: deinterlace)
         try Task.checkCancellation()
         cache[key] = image
         order.append(key)
@@ -74,12 +79,14 @@ actor FrameStore {
     }
 
     private static func grab(ffmpeg: URL, film: URL, at seconds: Double, box: CGSize,
-                             hdrTransfer: String?) async throws -> CGImage {
+                             hdrTransfer: String?, deinterlace: Bool) async throws -> CGImage {
         let out = FileManager.default.temporaryDirectory
             .appendingPathComponent("lacquer-menu-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: out) }
         let tonemap = hdrTransfer.map { BluRayEncoder.tonemapFilters(transfer: $0).joined(separator: ",") + "," } ?? ""
-        let filter = tonemap + "scale=w=trunc(iw*sar/2)*2:h=ih,setsar=1,"
+        // Deinterlace first, ahead of the tonemap and scaling, so the fields are still intact.
+        let deint = deinterlace ? "bwdif=mode=send_frame:parity=auto:deint=all," : ""
+        let filter = deint + tonemap + "scale=w=trunc(iw*sar/2)*2:h=ih,setsar=1,"
             + "scale=\(Int(box.width)):\(Int(box.height)):force_original_aspect_ratio=decrease:flags=lanczos"
         do {
             try await ProcessRunner.run(ffmpeg, arguments: [
@@ -111,8 +118,8 @@ final class MenuRenderer: Sendable {
     static let thumbnailOffset = 1.0
     static let thumbnailBox = CGSize(width: 640, height: 360)
 
-    init(ffmpeg: URL, hdrTransfer: String? = nil) {
-        frames = FrameStore(ffmpeg: ffmpeg, hdrTransfer: hdrTransfer)
+    init(ffmpeg: URL, hdrTransfer: String? = nil, deinterlace: Bool = false) {
+        frames = FrameStore(ffmpeg: ffmpeg, hdrTransfer: hdrTransfer, deinterlace: deinterlace)
     }
 
     func render(template: MenuTemplate, film: URL, chapters: [Double], hasSubtitles: Bool) async throws -> DiscMenu {
