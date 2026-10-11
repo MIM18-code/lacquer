@@ -380,7 +380,8 @@ struct BDMVAuthor {
             "font-name=Arial",
             "font-size=65",
             "font-color=0xFFFFFF",
-            "bottom-offset=21",
+            // Clear of the bottom 5% that TVs with overscan crop.
+            "bottom-offset=\(max(24, videoHeight * 7 / 100))",
             "font-border=2",
             "text-align=center",
             "video-width=\(videoWidth)",
