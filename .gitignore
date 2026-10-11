@@ -11,3 +11,4 @@ packaging/vendor/
 packaging/dist/
 .claude/
 Scripts/menu-check/menu_check
+Scripts/menu-check/vlc_drive

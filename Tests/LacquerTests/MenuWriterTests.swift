@@ -237,7 +237,7 @@ final class IGSEncoderTests: XCTestCase {
             buttons: [button(100, commands: [.move(register: 0, value: 0), .jumpTitle(1)]),
                       button(300, commands: [.jumpObject(2)])],
             defaultButton: 1)
-        XCTAssertEqual(set.segments.map { $0.bytes[0] }, [0x18, 0x14, 0x15, 0x15, 0x15, 0x15, 0x15, 0x15, 0x80])
+        XCTAssertEqual(set.segments.map { $0.bytes[0] }, [0x18, 0x14] + [UInt8](repeating: 0x15, count: 8) + [0x80])
         for s in set.segments { XCTAssertEqual(u16(s.bytes, 1), s.bytes.count - 3) }
 
         let ics = set.segments[0].bytes
@@ -251,6 +251,7 @@ final class IGSEncoderTests: XCTestCase {
         let page = 15 + 1 + 10 + 3 + 1             // model, timeouts, user timeout, page count
         XCTAssertEqual(ics[page], 0, "page id")
         let afterEffects = page + 2 + 8 + 4
+        XCTAssertEqual(ics[afterEffects], 1, "activated animation runs at the frame rate")
         XCTAssertEqual(u16(ics, afterEffects + 1), 1, "default selected button")
         XCTAssertEqual(u16(ics, afterEffects + 3), 0xFFFF)
         XCTAssertEqual(ics[afterEffects + 6], 2, "one BOG per button")
@@ -261,7 +262,12 @@ final class IGSEncoderTests: XCTestCase {
         XCTAssertEqual(u16(ics, b0 + 11), 1, "down neighbour")
         XCTAssertEqual(u16(ics, b0 + 17), 0, "normal object")
         XCTAssertEqual(u16(ics, b0 + 23), 1, "selected object")
-        XCTAssertEqual(u16(ics, b0 + 29), 2, "activated object")
+        XCTAssertEqual(u16(ics, b0 + 29), 2, "activated animation starts at object 2")
+        XCTAssertEqual(u16(ics, b0 + 31), 3, "and ends at object 3: a play-once lock on the remote")
+        // Button 1's objects start at 4.
+        let b1 = b0 + 35 + 2 * 12 + 3
+        XCTAssertEqual(u16(ics, b1), 1)
+        XCTAssertEqual(u16(ics, b1 + 17), 4)
         XCTAssertEqual(u16(ics, b0 + 33), 2, "two commands")
         XCTAssertEqual(Array(ics[(b0 + 35)..<(b0 + 47)]), NavCommand.move(register: 0, value: 0).bytes)
 
@@ -539,11 +545,13 @@ final class IGBudgetAndMapTests: XCTestCase {
         let set = try IGSEncoder.displaySet(buttons: rampButtons(1, width: 64, height: 16), defaultButton: 0)
         XCTAssertEqual(IGSEncoder.fnv1a(Array("a".utf8)), 0xE40C_292C)
         XCTAssertEqual(set.stateHashes.count, 1)
-        // Decode each object's RLE the way a player does and hash it.
+        // Decode each object's RLE the way a player does and hash it. Objects
+        // 2 and 3 are the two frames of the activated state.
         let objects = set.segments.filter { $0.bytes[0] == 0x15 }
-        for (state, ods) in objects.enumerated() {
+        XCTAssertEqual(objects.map { u16($0.bytes, 3) }, [0, 1, 2, 3])
+        for (n, ods) in objects.enumerated() {
             let indices = RLE.decode(Array(ods.bytes[14...]), width: 64, height: 16)!
-            XCTAssertEqual(IGSEncoder.fnv1a(indices), set.stateHashes[0][state])
+            XCTAssertEqual(IGSEncoder.fnv1a(indices), set.stateHashes[0][min(n, 2)])
         }
         XCTAssertEqual(Set(set.stateHashes[0]).count, 3, "the three states can be told apart")
     }

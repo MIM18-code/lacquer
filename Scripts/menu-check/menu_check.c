@@ -16,6 +16,14 @@
  * and Top Menu from the film returns to the first page, and the selection
  * survives the menu clip looping (or a still menu holds).
  *
+ * Rapid presses: libbluray runs a button's commands on the next read, and a
+ * second activation before that replaces them. VLC doesn't read while
+ * paused, and handles quick key presses between reads, so Subtitles Off
+ * followed by Play could start the film with subtitles still on. For each
+ * subtitle button on a page with a Play button, the check presses it and
+ * then walks to Play and presses that without reading in between; the film
+ * must still play with the subtitle state the first button chose.
+ *
  * libbluray doesn't export its player registers, so the selected button
  * comes from the overlay: each draw's position names the button, and the
  * FNV-1a of its palette indices names the state (the map lists the hash of
@@ -412,6 +420,27 @@ static int open_page(int p)
     return 1;
 }
 
+/* Keys (map edges) from button `from` to `to`, without looking at draws:
+ * what a fast remote sends before the player reads again. */
+static int key_path(const Page *pg, int from, int to, int *dirs)
+{
+    int prev_dir[256], prev[256], queue[256], qh = 0, qt = 0;
+    for (int i = 0; i < pg->n; i++) prev[i] = -2;
+    prev[from] = -1; queue[qt++] = from;
+    while (qh < qt) {
+        int u = queue[qh++];
+        for (int d = 0; d < 4; d++) {
+            int v = pg->b[u].next[d];
+            if (v >= 0 && v < pg->n && prev[v] == -2) { prev[v] = u; prev_dir[v] = d; queue[qt++] = v; }
+        }
+    }
+    if (prev[to] == -2) return -1;
+    int n = 0;
+    for (int v = to; v != from; v = prev[v]) dirs[n++] = prev_dir[v];
+    for (int i = 0; i < n / 2; i++) { int t = dirs[i]; dirs[i] = dirs[n - 1 - i]; dirs[n - 1 - i] = t; }
+    return n;
+}
+
 /* Finds a playFilm button: its page and index. */
 static int find_play(int *page, int *button)
 {
@@ -531,6 +560,39 @@ static void check_action(int p, int b)
               "page %d button %d (setSubtitles %s): menu %s, then the film plays with subtitle stream %d %s",
               p + 1, b, on ? "on" : "off", stayed ? "stays" : "DIDN'T STAY", c.pg_stream,
               c.pg_enabled ? "shown" : "hidden");
+
+        /* Rapid: the opposite setting first, then this button and Play on
+         * this page with no read in between. */
+        int other_p = -1, other_b = -1, play = -1;
+        for (int q = 0; q < m.npages && other_p < 0; q++)
+            for (int k = 0; k < m.pages[q].n; k++)
+                if (!strcmp(m.pages[q].b[k].action, "setSubtitles") && m.pages[q].b[k].value != on) { other_p = q; other_b = k; break; }
+        for (int k = 0; k < pg->n; k++) if (!strcmp(pg->b[k].action, "playFilm")) { play = k; break; }
+        int dirs[256], nd = play >= 0 ? key_path(pg, b, play, dirs) : -1;
+        if (other_p >= 0 && nd >= 0 && open_page(other_p) && select_button(&m.pages[other_p], other_b)) {
+            starts = c.playlist_starts;
+            key(BD_VK_ENTER, "ENTER");
+            pump(30, new_playlist, starts);
+            ok = open_page(p) && select_button(pg, b);
+            if (ok) {
+                starts = c.playlist_starts;
+                key(BD_VK_ENTER, "ENTER (no read before the next keys)");
+                for (int i = 0; i < nd; i++) key(dir_key[dirs[i]], dir_name[dirs[i]]);
+                key(BD_VK_ENTER, "ENTER on Play");
+                ok = pump(6000, film_started, starts);
+                if (!ok) {
+                    /* The quick Play press was ignored; press it again. */
+                    ok = select_button(pg, play);
+                    starts = c.playlist_starts;
+                    key(BD_VK_ENTER, "ENTER on Play again");
+                    ok = ok && pump(6000, film_started, starts);
+                }
+                pump(60, never, 0);
+            }
+            check(ok && c.pg_enabled == on,
+                  "page %d button %d (setSubtitles %s) then Play before the player reads: the film plays with subtitles %s",
+                  p + 1, b, on ? "on" : "off", c.pg_enabled ? "shown" : "hidden");
+        }
     } else {
         check(0, "page %d button %d: unknown action %s", p + 1, b, bt->action);
     }
