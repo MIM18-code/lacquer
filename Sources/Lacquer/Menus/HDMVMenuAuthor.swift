@@ -13,7 +13,10 @@ import UniformTypeIdentifiers
 /// - Movie object 0 is the film (title 1). It plays 00000.mpls from the
 ///   chapter mark in GPR0 (0 = the start), with subtitles shown if GPR2 is 1,
 ///   and goes back to the first menu page when the film ends.
-/// - Movie object 1 + p plays menu page p's playlist (01000 + p) in a loop.
+/// - Movie object 1 + p selects page p's default button, then plays its
+///   playlist (01000 + p) in a loop. The page's IG composition names no
+///   default button, so the player uses that stored selection, and a loop
+///   restart keeps whatever the viewer had selected.
 /// - First Playback and Top Menu both run the first page's object.
 /// - Buttons set GPR0/GPR2 and jump to title 1, or jump to another page's
 ///   object. Button commands can't change playlists themselves.
@@ -80,14 +83,14 @@ struct HDMVMenuAuthor {
         var commands: [[[NavCommand]]] = []
         var neighbours: [[[Int]]] = []
         for (p, page) in menu.pages.enumerated() {
-            let loops = menu.loopSeconds > 0
-            objects.append(MovieObject(commands: loops
-                ? [.playPlaylist(menuPlaylist(page: p)), .goto(0)]
-                : [.playPlaylist(menuPlaylist(page: p))]))
             guard !page.buttons.isEmpty else { throw MenuError.invalid("page \(p + 1) has no buttons") }
             guard page.buttons.indices.contains(page.defaultButton) else {
                 throw MenuError.invalid("page \(p + 1)'s default button doesn't exist")
             }
+            var pageObject: [NavCommand] = [.setButtonPage(button: page.defaultButton, page: 0),
+                                            .playPlaylist(menuPlaylist(page: p))]
+            if menu.loopSeconds > 0 { pageObject.append(.goto(1)) }
+            objects.append(MovieObject(commands: pageObject))
             var pageCommands: [[NavCommand]] = []
             var pageNeighbours: [[Int]] = []
             for (b, button) in page.buttons.enumerated() {
@@ -180,7 +183,7 @@ struct HDMVMenuAuthor {
                                          activated: button.activated, up: links[0], down: links[1],
                                          left: links[2], right: links[3], commands: nav.buttonCommands[p][b])
             }
-            let display = try IGSEncoder.displaySet(buttons: buttons, defaultButton: page.defaultButton)
+            let display = try IGSEncoder.displaySet(buttons: buttons, defaultButton: nil)
 
             let input = M2TSMuxer.Input(video: units, frameRate: Self.menuFrameRate,
                                         audio: audioFrames, audioBitrateKbps: 192, menu: display)

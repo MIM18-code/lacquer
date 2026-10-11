@@ -141,8 +141,10 @@ enum IGSEncoder {
         }
     }
 
-    /// `frameRateCode` 1 = 23.976 (the menu clip's video rate).
-    static func displaySet(buttons: [Button], defaultButton: Int,
+    /// `frameRateCode` 1 = 23.976 (the menu clip's video rate). A nil
+    /// `defaultButton` leaves the choice to the selection the movie object
+    /// stored (PSR10).
+    static func displaySet(buttons: [Button], defaultButton: Int?,
                            width: Int = 1920, height: Int = 1080, frameRateCode: Int = 1) throws -> IGDisplaySet {
         guard buttons.count <= 255 else { throw EncodeError.tooManyButtons(buttons.count) }
 
@@ -191,7 +193,7 @@ enum IGSEncoder {
         c.u8(0); c.u8(0)            // in effects: no windows, no effects
         c.u8(0); c.u8(0)            // out effects
         c.u8(0)                     // animation_frame_rate_code
-        c.u16(defaultButton)        // default_selected_button_id_ref
+        c.u16(defaultButton ?? 0xFFFF)  // default_selected_button_id_ref
         c.u16(0xFFFF)               // default_activated_button_id_ref: none
         c.u8(0)                     // palette_id_ref
         c.u8(buttons.count)         // number_of_BOGs

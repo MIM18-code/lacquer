@@ -2,7 +2,10 @@
  * menu_check: plays a Lacquer menu disc through libbluray's HDMV navigation
  * (the code VLC uses for Blu-ray menus) and checks that the menu works.
  *
- *   menu_check DISC --chapters 0,20,40 [--subtitles] [--verbose]
+ *   menu_check DISC --chapters 0,20,40 [--subtitles] [--still] [--verbose]
+ *
+ * --still: the menu is a still (infinite PlayItem still) rather than a
+ * loop, so check that it holds instead of checking the loop restart.
  *
  * DISC is a BDMV folder or an ISO. The checks assume the layout of
  * Lacquer's --menu-demo menu: a main page of Play, Scenes and (with
@@ -36,6 +39,7 @@ typedef struct {
 typedef struct {
     int verbose;
     int playlist, title, chapter;
+    int playlist_starts;
     int pg_stream, pg_enabled;
     int ig_flushes;
     Draw draws[MAX_DRAWS];
@@ -149,7 +153,7 @@ static void clear_log(Ctx *c) { c->ndraws = 0; c->ig_flushes = 0; }
 static void handle_event(Ctx *c, const BD_EVENT *ev)
 {
     switch (ev->event) {
-    case BD_EVENT_PLAYLIST:          c->playlist = ev->param; break;
+    case BD_EVENT_PLAYLIST:          c->playlist = ev->param; c->playlist_starts++; break;
     case BD_EVENT_TITLE:             c->title = ev->param; break;
     case BD_EVENT_CHAPTER:           c->chapter = ev->param; break;
     case BD_EVENT_PG_TEXTST_STREAM:  c->pg_stream = ev->param; break;
@@ -189,6 +193,7 @@ static int menu_drawn(const Ctx *c, int playlist)
     return c->playlist == playlist && c->ig_flushes > 0 && c->ndraws > 0;
 }
 static int on_playlist(const Ctx *c, int playlist) { return c->playlist == playlist; }
+static int looped(const Ctx *c, int starts) { return c->playlist_starts > starts && c->ig_flushes > 0; }
 static int on_chapter(const Ctx *c, int chapter) { return c->playlist == FILM_PLAYLIST && c->chapter == chapter; }
 
 static void key(BLURAY *bd, Ctx *c, uint32_t k, const char *name)
@@ -213,7 +218,7 @@ int main(int argc, char **argv)
 {
     const char *disc = NULL;
     double chapters[64];
-    int nchapters = 0, subtitles = 0;
+    int nchapters = 0, subtitles = 0, still = 0;
     Ctx c;
     memset(&c, 0, sizeof c);
     c.playlist = c.title = c.chapter = -1;
@@ -221,6 +226,7 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--verbose")) c.verbose = 1;
         else if (!strcmp(argv[i], "--subtitles")) subtitles = 1;
+        else if (!strcmp(argv[i], "--still")) still = 1;
         else if (!strcmp(argv[i], "--chapters") && i + 1 < argc) {
             char *s = argv[++i];
             while (*s && nchapters < 64) {
@@ -265,6 +271,22 @@ int main(int argc, char **argv)
     check(state_at(&c, main_btn[1]) == SELECTED && state_at(&c, main_btn[0]) == NORMAL,
           "DOWN selects Scenes and deselects Play (%s, %s)",
           state_name[state_at(&c, main_btn[1])], state_name[state_at(&c, main_btn[0])]);
+    if (still) {
+        /* A still menu holds: reading on changes nothing and keeps the menu. */
+        int starts = c.playlist_starts;
+        clear_log(&c);
+        pump(bd, &c, 5000, looped, starts);
+        check(c.playlist_starts == starts && c.playlist == MENU_PLAYLIST && c.ndraws == 0,
+              "the still menu holds with Scenes selected");
+    } else {
+        /* The menu clip loops; the selection should survive the restart. */
+        int starts = c.playlist_starts;
+        clear_log(&c);
+        ok = pump(bd, &c, 40000, looped, starts);
+        check(ok && c.playlist == MENU_PLAYLIST && state_at(&c, main_btn[1]) == SELECTED
+                 && state_at(&c, main_btn[0]) == NORMAL,
+              "after the menu loops, Scenes is still selected (%s)", state_name[state_at(&c, main_btn[1])]);
+    }
     clear_log(&c);
     key(bd, &c, BD_VK_RIGHT, "RIGHT");
     check(c.ndraws == 0, "RIGHT with no button to the right leaves the selection alone");
