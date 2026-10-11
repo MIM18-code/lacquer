@@ -49,7 +49,12 @@ struct ContentView: View {
         .navigationSubtitle(subtitle)
         .toolbar { toolbar }
         .onAppear { coordinator.loadTools() }
-        .alert("Something went wrong", isPresented: .init(
+        .onChange(of: coordinator.requestAddFiles) { requested in
+            guard requested else { return }
+            coordinator.requestAddFiles = false
+            pickFiles()
+        }
+        .alert(coordinator.errorTitle, isPresented: .init(
             get: { coordinator.errorMessage != nil },
             set: { if !$0 { coordinator.errorMessage = nil } }
         )) {
@@ -95,14 +100,13 @@ struct ContentView: View {
                     Label("Stop", systemImage: "stop.fill")
                 }
                 .disabled(coordinator.stopRequested)
-                .help("Stop the current disc and delete its partial output. The rest of the queue stays.")
+                .help("Stop the current disc and delete its partial output. The rest of the queue stays. (⌘.)")
             } else {
                 Button {
                     coordinator.start()
                 } label: {
                     Label("Start", systemImage: "play.fill")
                 }
-                .keyboardShortcut(.return, modifiers: .command)
                 .disabled(!coordinator.hasPendingJobs || coordinator.tools == nil)
                 .help("Encode every waiting disc (⌘↩)")
             }
@@ -171,7 +175,10 @@ struct ContentView: View {
 
     private var footer: some View {
         let pending = coordinator.jobs.filter { $0.status == .pending }
-        let bytes = pending.reduce(Int64(0)) { $0 + coordinator.plan(for: $1).estimatedBytes }
+        let bytes = pending.reduce(Int64(0)) { total, job in
+            let plan = coordinator.plan(for: job)
+            return plan.isBlocked ? total : total + plan.estimatedBytes
+        }
         let size = formatGB(bytes)
         return HStack {
             Text(pending.isEmpty
@@ -181,6 +188,9 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
             Spacer()
+            if coordinator.jobs.contains(where: { $0.status.canRetry }) && !coordinator.isRunning {
+                Button("Retry All") { coordinator.retryFailed() }
+            }
             Button("Clear Done") { coordinator.clearFinished() }
                 .disabled(!coordinator.jobs.contains { $0.status == .done })
         }
@@ -664,6 +674,7 @@ struct JobRow: View {
         guard let start = job.startedAt, job.progress > 0.02, job.progress < 1 else { return nil }
         let elapsed = Date().timeIntervalSince(start)
         let remaining = elapsed * (1 - job.progress) / job.progress
+        guard remaining >= 5 else { return nil }
         let f = DateComponentsFormatter()
         f.allowedUnits = remaining >= 3600 ? [.hour, .minute] : [.minute, .second]
         f.unitsStyle = .short
@@ -686,7 +697,8 @@ struct JobRow: View {
     private var warnings: some View {
         if !plan.warnings.isEmpty {
             VStack(alignment: .leading, spacing: 5) {
-                ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, w in
+                // A failed job already shows its reason; don't repeat it.
+                ForEach(Array(plan.warnings.filter { $0.text != job.errorMessage }.enumerated()), id: \.offset) { _, w in
                     Label {
                         Text(w.text)
                             .fixedSize(horizontal: false, vertical: true)
@@ -763,6 +775,7 @@ struct JobRow: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                             .frame(maxWidth: 220, alignment: .leading)
+                            .fixedSize(horizontal: true, vertical: false)
                         Picker("Subtitle language", selection: Binding(
                             get: { job.subtitleLanguageCode.isEmpty ? "eng" : job.subtitleLanguageCode },
                             set: { onSelectSubtitleLanguage($0) }

@@ -47,7 +47,23 @@ struct LacquerApp: App {
             CommandGroup(replacing: .appInfo) {
                 Button("About \(AppInfo.name)") { AppDelegate.showAbout() }
             }
-            CommandGroup(replacing: .newItem) { }
+            CommandGroup(replacing: .newItem) {
+                Button("Add Files…") { coordinator.requestAddFiles = true }
+                    .keyboardShortcut("o", modifiers: .command)
+            }
+            CommandMenu("Queue") {
+                Button("Start") { coordinator.start() }
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!coordinator.hasPendingJobs || coordinator.isRunning || coordinator.tools == nil)
+                Button("Stop") { coordinator.stop() }
+                    .keyboardShortcut(".", modifiers: .command)
+                    .disabled(!coordinator.isRunning)
+                Divider()
+                Button("Retry All") { coordinator.retryFailed() }
+                    .disabled(coordinator.isRunning || !coordinator.jobs.contains { $0.status.canRetry })
+                Button("Clear Done") { coordinator.clearFinished() }
+                    .disabled(!coordinator.jobs.contains { $0.status == .done })
+            }
         }
     }
 }
@@ -86,10 +102,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Stop encoding and quit?"
         alert.informativeText = "The current job stops and its partial output is deleted. Jobs still in the queue are not saved."
-        alert.addButton(withTitle: "Quit")
+        // Return keeps encoding; quitting takes a deliberate click.
         alert.addButton(withTitle: "Keep Encoding")
+        let quit = alert.addButton(withTitle: "Quit")
+        quit.hasDestructiveAction = true
         alert.alertStyle = .warning
-        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+        guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+        // Let the job stop and clean up before the app goes away; give up
+        // waiting after ten seconds so Quit always works.
+        Task { @MainActor in
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await coordinator.stopAndWait() }
+                group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000) }
+                await group.next()
+                group.cancelAll()
+            }
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -102,8 +132,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
         let credits = """
         Turns a finished film master into a Blu-ray disc: a BDMV folder, a UDF 2.50 ISO, or an M2TS for Toast.
-
-        Made by MindInMotion. Licensed under GPL-3.0.
 
         Uses FFmpeg (GPL), x264 (GPL) and tsMuxeR (Apache-2.0). Their licenses and source locations are in THIRD_PARTY_NOTICES.md inside the app.
         """

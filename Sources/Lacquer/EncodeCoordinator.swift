@@ -13,9 +13,13 @@ final class EncodeCoordinator: ObservableObject {
         didSet { if settings != oldValue { settings.save() } }
     }
     @Published var errorMessage: String?
+    /// Headline for the alert showing `errorMessage`.
+    @Published var errorTitle = "Lacquer couldn't continue"
     @Published var tools: ExternalTools?
     @Published var capabilities: BluRayEncoder.Capabilities = .none
     @Published private(set) var stopRequested = false
+    /// Set by File › Add Files…; the window shows its open panel and resets it.
+    @Published var requestAddFiles = false
 
     private var runTask: Task<Void, Never>?
 
@@ -34,6 +38,7 @@ final class EncodeCoordinator: ObservableObject {
             }
         } catch {
             tools = nil
+            errorTitle = "Encoding tools are missing"
             errorMessage = error.localizedDescription
         }
     }
@@ -64,6 +69,7 @@ final class EncodeCoordinator: ObservableObject {
             if let reason = await loadInput(url) { failures.append(reason) }
         }
         if !failures.isEmpty {
+            errorTitle = failures.count == 1 ? "This file wasn't added" : "\(failures.count) files weren't added"
             errorMessage = failures.joined(separator: "\n\n")
         }
     }
@@ -94,8 +100,25 @@ final class EncodeCoordinator: ObservableObject {
             appendLog("    audio: \(info.label(for: job.audioSource))")
             return nil
         } catch {
-            return "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)"
+            return Self.unreadableMessage(for: url, error: error)
         }
+    }
+
+    /// ffprobe's own errors ("moov atom not found") mean little to most
+    /// people; say what's likely wrong and what to do.
+    static func unreadableMessage(for url: URL, error: Error) -> String {
+        let name = url.lastPathComponent
+        let detail = "\(error)"
+        if detail.contains("moov atom not found") {
+            return "\(name) isn't a complete movie file. If it's still exporting or copying, wait for it to finish and add it again."
+        }
+        if detail.contains("No video stream") {
+            return "\(name) has no video, so there's nothing to put on a disc."
+        }
+        if detail.contains("Invalid data found") {
+            return "\(name) isn't a video format Lacquer can read. Export a ProRes, DNxHR, H.264 or HEVC master and add that."
+        }
+        return "\(name) couldn't be read. \(error.localizedDescription)"
     }
 
     // MARK: - Per-job settings
@@ -139,6 +162,10 @@ final class EncodeCoordinator: ObservableObject {
         }
     }
 
+    func retryFailed() {
+        for job in jobs where job.status.canRetry { retry(job) }
+    }
+
     func clearFinished() {
         jobs.removeAll { $0.status == .done }
     }
@@ -147,6 +174,16 @@ final class EncodeCoordinator: ObservableObject {
 
     func start() {
         guard runTask == nil, tools != nil else { return }
+        // A chosen output folder that can't be written would fail every
+        // job in turn; catch it once, up front.
+        if let folder = settings.outputFolder {
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            if !EncodePipeline.isWritable(folder) {
+                errorTitle = "Can't save to that folder"
+                errorMessage = "Lacquer can't save to \(folder.path). Choose another folder under Save to, or set it back to next to each master."
+                return
+            }
+        }
         stopRequested = false
         runTask = Task { [weak self] in
             await self?.runQueue()
@@ -159,6 +196,14 @@ final class EncodeCoordinator: ObservableObject {
     func stop() {
         stopRequested = true
         runTask?.cancel()
+    }
+
+    /// Stops the running job and returns once its cleanup (deleting the
+    /// partial output, closing the log) has finished.
+    func stopAndWait() async {
+        guard let task = runTask else { return }
+        stop()
+        await task.value
     }
 
     private func runQueue() async {

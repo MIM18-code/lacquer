@@ -85,9 +85,20 @@ struct EncodePlan: Equatable, Sendable {
         var warnings: [PlanWarning] = []
         let checksDisc = settings.outputMode != .m2tsOnly
         if checksDisc && !fits {
-            warnings.append(PlanWarning(level: .blocking, text: String(format:
-                "%@ is too long for %@ at AC-3 %d kbps. Switch to BD-50, use 448 kbps audio, or trim it.",
-                formatDuration(info.duration), disc.shortName, audioKbps)))
+            // Only suggest changes that would actually make it fit.
+            var fixes: [String] = []
+            func fitsWith(disc d: DiscSize, audioKbps a: Int) -> Bool {
+                let v = BluRayEncoder.videoBitrate(durationSeconds: info.duration, discBytes: d.usableBytes,
+                                                   audioBitsPerSecond: a * 1000)
+                return BluRayEncoder.fitsOnDisc(videoBitrate: v, durationSeconds: info.duration,
+                                                discBytes: d.usableBytes, audioBitsPerSecond: a * 1000)
+            }
+            if disc == .bd25 && fitsWith(disc: .bd50, audioKbps: audioKbps) { fixes.append("switch to BD-50") }
+            if audioKbps > 448 && fitsWith(disc: disc, audioKbps: 448) { fixes.append("use 448 kbps audio") }
+            fixes.append(fixes.isEmpty ? "split it across discs" : "trim it")
+            let advice = fixes.count == 1 ? fixes[0] : fixes.dropLast().joined(separator: ", ") + " or " + fixes.last!
+            warnings.append(PlanWarning(level: .blocking, text:
+                "\(formatDuration(info.duration)) is too long for \(disc.shortName). To fit, \(advice)."))
         } else if checksDisc && vBitrate < BluRayEncoder.videoBitrateQualityFloor {
             warnings.append(PlanWarning(level: .caution, text:
                 "Video gets \(vBitrate / 1000) kbps to fit \(disc.shortName), below the 8,000 kbps where compression starts to show."
