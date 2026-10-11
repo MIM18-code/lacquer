@@ -102,15 +102,7 @@ struct BluRayEncoder {
         }
 
         if source.isHDR && capabilities.canTonemapHDR {
-            // PQ/HLG → linear light → BT.709 primaries → Hable tonemap →
-            // BT.709 transfer. Without this, HDR pixels tagged as BT.709
-            // play back flat and washed out.
-            let tin = source.colorTransfer
-            filters.append("zscale=tin=\(tin):min=bt2020nc:pin=bt2020:t=linear:npl=100")
-            filters.append("format=gbrpf32le")
-            filters.append("zscale=p=bt709")
-            filters.append("tonemap=tonemap=hable:desat=0")
-            filters.append("zscale=t=bt709:m=bt709:r=tv")
+            filters += tonemapFilters(transfer: source.colorTransfer)
         }
 
         if abs(source.sampleAspect - 1) > 0.01 {
@@ -155,6 +147,19 @@ struct BluRayEncoder {
         }
         filters.append("format=yuv420p")
         return filters.joined(separator: ",")
+    }
+
+    /// PQ/HLG → linear light → BT.709 primaries → Hable tonemap → BT.709
+    /// transfer. Without this, HDR pixels tagged as BT.709 play back flat
+    /// and washed out. Used for the encode and for menu stills.
+    static func tonemapFilters(transfer: String) -> [String] {
+        [
+            "zscale=tin=\(transfer):min=bt2020nc:pin=bt2020:t=linear:npl=100",
+            "format=gbrpf32le",
+            "zscale=p=bt709",
+            "tonemap=tonemap=hable:desat=0",
+            "zscale=t=bt709:m=bt709:r=tv"
+        ]
     }
 
     static func x264Params(standard: VideoStandard) -> String {

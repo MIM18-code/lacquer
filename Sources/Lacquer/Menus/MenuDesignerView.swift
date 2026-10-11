@@ -19,13 +19,16 @@ struct MenuDesignerView: View {
     @State private var choosingImage = false
     @Environment(\.dismiss) private var dismiss
 
-    init(template: Binding<MenuTemplate>, film: URL, chapters: [Double], ffmpeg: URL, hasSubtitles: Bool) {
+    /// `hdrTransfer`: the film's PQ/HLG transfer when its stills need
+    /// tonemapping (only pass it when the ffmpeg can tonemap).
+    init(template: Binding<MenuTemplate>, film: URL, chapters: [Double], ffmpeg: URL, hasSubtitles: Bool,
+         hdrTransfer: String? = nil) {
         _template = template
         self.film = film
         self.chapters = chapters
         self.ffmpeg = ffmpeg
         self.hasSubtitles = hasSubtitles
-        _model = StateObject(wrappedValue: MenuDesignerModel(ffmpeg: ffmpeg))
+        _model = StateObject(wrappedValue: MenuDesignerModel(ffmpeg: ffmpeg, hdrTransfer: hdrTransfer))
     }
 
     private var request: RenderRequest {
@@ -38,7 +41,7 @@ struct MenuDesignerView: View {
             Divider()
             settingsColumn
         }
-        .frame(minWidth: 1040, idealWidth: 1200, minHeight: 680, idealHeight: 780)
+        .frame(minWidth: 840, idealWidth: 1180, minHeight: 600, idealHeight: 760)
         .task(id: request) {
             await model.refresh(template: template, film: film, chapters: chapters,
                                 hasSubtitles: hasSubtitles, page: model.pageIndex)
@@ -170,6 +173,13 @@ struct MenuDesignerView: View {
                         let pages = max(1, model.pageCount - 1)
                         note("\(chapters.count) scenes on \(pages) \(pages == 1 ? "page" : "pages").")
                     }
+                    Section("Scene names") {
+                        ForEach(chapters.indices, id: \.self) { i in
+                            TextField(MenuPlanner.timeString(chapters[i]), text: sceneName(i),
+                                      prompt: Text("Scene \(i + 1)"))
+                        }
+                        note("Shown under each thumbnail. Leave one blank to use \"Scene\" and its number.")
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -182,12 +192,24 @@ struct MenuDesignerView: View {
             .padding([.horizontal, .bottom], 16)
             .padding(.top, 4)
         }
-        .frame(width: 340)
+        .frame(width: 310)
         .fileImporter(isPresented: $choosingImage, allowedContentTypes: [.image]) { result in
             if case .success(let url) = result {
                 template.background = .imageFile(path: url.path)
             }
         }
+    }
+
+    private func sceneName(_ i: Int) -> Binding<String> {
+        Binding(
+            get: { i < template.sceneNames.count ? template.sceneNames[i] : "" },
+            set: { value in
+                if template.sceneNames.count <= i {
+                    template.sceneNames += Array(repeating: "", count: i + 1 - template.sceneNames.count)
+                }
+                template.sceneNames[i] = String(value.prefix(40))
+            }
+        )
     }
 
     private func note(_ text: String) -> some View {
@@ -441,8 +463,8 @@ final class MenuDesignerModel: ObservableObject {
         var hasSubtitles: Bool
     }
 
-    init(ffmpeg: URL) {
-        renderer = MenuRenderer(ffmpeg: ffmpeg)
+    init(ffmpeg: URL, hdrTransfer: String? = nil) {
+        renderer = MenuRenderer(ffmpeg: ffmpeg, hdrTransfer: hdrTransfer)
     }
 
     // MARK: Rendering
