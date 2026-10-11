@@ -66,19 +66,90 @@ struct BluRayEncoder {
 
     // MARK: - Video
 
-    func encodeVideo(
-        input: URL,
-        videoOut: URL,
-        bitrate: Int,
+    /// What the bundled ffmpeg can do beyond the basics. Detected once at
+    /// launch so a Homebrew ffmpeg without zimg still works, minus HDR
+    /// tonemapping.
+    struct Capabilities: Equatable, Sendable {
+        var canTonemapHDR: Bool
+
+        static let none = Capabilities(canTonemapHDR: false)
+    }
+
+    /// The `-vf` chain for one encode. Order matters:
+    ///
+    ///   [bwdif?] → [HDR tonemap?] → scale → pad → setsar → [interlace|setfield?] → format
+    static func videoFilterChain(
         standard: VideoStandard,
-        sourceIsInterlaced: Bool,
-        sourceFrameRate: Double,
-        twoPass: Bool,
-        duration: Double,
-        logger: RunLogger? = nil,
-        progress: @escaping @Sendable (Double) -> Void
-    ) async throws {
-        // Build x264 params.
+        source: MediaInfo,
+        capabilities: Capabilities
+    ) -> String {
+        let w = standard.width
+        let h = standard.height
+        let sourceFrameRate = source.frameRate
+        var filters: [String] = []
+
+        if !standard.isInterlaced && source.sourceIsInterlaced {
+            // Interlaced → progressive needs a real deinterlacer, and it has
+            // to run BEFORE the scaler, or the scaler blends the two fields
+            // of each combed frame together first. `send_field` turns every
+            // field into a frame when the target rate is ~2× the source
+            // frame rate (1080i29.97 → 720p59.94), keeping all the motion;
+            // `send_frame` covers everything else. `parity=auto` reads the
+            // source's field order tag.
+            let ratio = sourceFrameRate > 0 ? standard.frameRateValue / sourceFrameRate : 0
+            let mode = abs(ratio - 2.0) < 0.05 ? "send_field" : "send_frame"
+            filters.append("bwdif=mode=\(mode):parity=auto:deint=all")
+        }
+
+        if source.isHDR && capabilities.canTonemapHDR {
+            // PQ/HLG → linear light → BT.709 primaries → Hable tonemap →
+            // BT.709 transfer. Without this, HDR pixels tagged as BT.709
+            // play back flat and washed out.
+            let tin = source.colorTransfer
+            filters.append("zscale=tin=\(tin):min=bt2020nc:pin=bt2020:t=linear:npl=100")
+            filters.append("format=gbrpf32le")
+            filters.append("zscale=p=bt709")
+            filters.append("tonemap=tonemap=hable:desat=0")
+            filters.append("zscale=t=bt709:m=bt709:r=tv")
+        }
+
+        // `force_original_aspect_ratio=decrease` fits the source inside the
+        // frame without stretching; `pad` adds the black bars. Letterboxes
+        // scope/1.85/DCI, pillarboxes 4:3, no-op for 16:9.
+        var scale = "scale=\(w):\(h):flags=lanczos:force_original_aspect_ratio=decrease"
+        if source.usesBT601Matrix && !source.isHDR {
+            // SD sources use the BT.601 matrix; Blu-ray HD is BT.709.
+            scale += ":in_color_matrix=bt601:out_color_matrix=bt709"
+        }
+        scale += ":out_range=tv"
+        if standard.isInterlaced && source.sourceIsInterlaced {
+            // Interlaced in and out: scale each field separately so the
+            // fields don't smear into each other.
+            scale += ":interl=1"
+        }
+        filters.append(scale)
+        filters.append("pad=\(w):\(h):(ow-iw)/2:(oh-ih)/2:color=black")
+        filters.append("setsar=1/1")
+
+        if standard.isInterlaced && !source.sourceIsInterlaced {
+            // Progressive → interlaced. Only a source at ~2× the target
+            // frame rate (50p → 25i, 59.94p → 29.97i) gets paired into
+            // fields; anything else is flagged as progressive segmented
+            // frames, which keeps its cadence. The tolerance excludes
+            // cross-standard cases like 50p → 29.97i (ratio 1.67), where
+            // pairing would stutter.
+            let ratio = standard.frameRateValue > 0 ? sourceFrameRate / standard.frameRateValue : 0
+            if abs(ratio - 2.0) < 0.05 {
+                filters.append("interlace=scan=tff:lowpass=0")
+            } else {
+                filters.append("setfield=mode=tff")
+            }
+        }
+        filters.append("format=yuv420p")
+        return filters.joined(separator: ",")
+    }
+
+    static func x264Params(standard: VideoStandard) -> String {
         var params: [String] = [
             "bluray-compat=1",
             "level=\(standard.h264Level)",
@@ -97,114 +168,37 @@ struct BluRayEncoder {
             "slices=4"
         ]
         if standard.isInterlaced {
-            // x264 / libx264 in ffmpeg accepts `tff=1` (or `bff=1`), NOT
-            // `interlaced=tff`. The latter is rejected at parse time
-            // ("Error parsing option 'interlaced = tff'"); ffmpeg then
-            // continues with progressive defaults and 1080i presets
-            // silently produce a progressive H.264 stream that ffprobe
-            // reports as `field_order=progressive`. Verified: `tff=1`
-            // yields `field_order=tt` (top-field-first) on the bundled
-            // libx264.
+            // libx264 accepts `tff=1`. `interlaced=tff` fails to parse and
+            // ffmpeg silently falls back to progressive.
             params.append("tff=1")
         }
-        let x264Joined = params.joined(separator: ":")
+        return params.joined(separator: ":")
+    }
 
-        // Build the video filter chain.
-        //
-        // Order matters. The chain is built as:
-        //
-        //   [bwdif?] → scale → pad → setsar → [interlace|setfield?] → format
-        //
-        // The deinterlacer comes BEFORE the scaler. If `bwdif` ran after
-        // `scale`, the scaler would see combed interlaced frames as
-        // progressive and blend the two fields together (especially
-        // visible on 1080i → 720p downscales) before the deinterlacer
-        // ever got a clean shot at separating them.
-        //
-        // `force_original_aspect_ratio=decrease` shrinks the source to fit
-        // *inside* the BD frame without stretching, then `pad` adds black
-        // bars to reach the exact target dimensions. This letterboxes
-        // 2.39:1 / DCI / 1.85:1 / 21:9 sources and pillarboxes 4:3 sources
-        // instead of geometrically distorting them. For 16:9 sources the
-        // pad is a no-op.
-        let w = standard.width
-        let h = standard.height
-        var vf = ""
-        if !standard.isInterlaced && sourceIsInterlaced {
-            // Interlaced → progressive needs an actual deinterlacer, or the
-            // encoder happily compresses combed fields as if they were
-            // progressive frames and the result has visible interlace
-            // artefacts. `bwdif` is the modern motion-adaptive deinterlacer
-            // (better than `yadif`) and is in every ffmpeg build we ship.
-            //
-            // Mode picks based on whether the target frame rate is roughly
-            // double the source's interlaced frame rate:
-            //
-            // - `send_field` emits one progressive frame per *field*
-            //   (1080i29.97 → 720p59.94: 29.97 frames × 2 fields = 59.94 fps).
-            //   Preserves the full temporal motion of the source — every
-            //   field becomes a unique output frame, no duplication.
-            // - `send_frame` emits one progressive frame per *frame*
-            //   (everything else: 1080i25 → 1080p23.976, 1080i29.97 →
-            //   720p23.976, etc.). Halves the temporal information of the
-            //   source, which is the right call when the target rate is
-            //   ≤ source frame rate; ffmpeg's `-r` then handles any
-            //   remaining rate retiming.
-            //
-            // `parity=auto` lets ffmpeg pick from the source's field order
-            // tag. We assume TFF when the tag is absent — virtually all
-            // 1080i/29.97 and 1080i/25 broadcast material is TFF.
-            //
-            // Tolerance of 0.05 around 2.0 catches 59.94/29.97 (=2.000)
-            // and 50/25 (=2.000); excludes anything else.
-            let targetFps = standard.frameRateValue
-            let ratio = sourceFrameRate > 0 ? targetFps / sourceFrameRate : 0
-            let mode = abs(ratio - 2.0) < 0.05 ? "send_field" : "send_frame"
-            vf += "bwdif=mode=\(mode):parity=auto:deint=all,"
-        }
-        vf += "scale=\(w):\(h):flags=lanczos:force_original_aspect_ratio=decrease,"
-            + "pad=\(w):\(h):(ow-iw)/2:(oh-ih)/2:color=black,setsar=1/1"
-        if standard.isInterlaced && !sourceIsInterlaced {
-            // Progressive → interlaced needs two different paths depending
-            // on source rate.
-            //
-            // 1. Source fps ≈ 2× target frame rate (50p → 25i, 59.94p →
-            //    29.97i): use `interlace=scan=tff` to pair adjacent frames
-            //    into top/bottom fields. Halves frame rate, keeps field
-            //    rate intact. SAFE only when the ratio is genuinely near
-            //    2.0 — cross-standard cases like 50p → 29.97i have ratio
-            //    ≈ 1.67, where pairing yields 25 fps and `-r` then
-            //    duplicates back to 29.97, causing stutter.
-            // 2. Anything else (same-rate 25p → 25i, 29.97p → 29.97i;
-            //    cross-standard 50p → 29.97i; slow sources like 23.976 →
-            //    29.97i): `setfield=mode=tff` flags each frame as PsF
-            //    (Progressive Segmented Frame). x264's `tff=1` +
-            //    `+ildct+ilme` encode it as a pair of fields without
-            //    changing the cadence. ffmpeg's `-r` then handles the
-            //    rate retiming via duplication, which is suboptimal for
-            //    cross-standard but at least avoids the field-pair
-            //    stutter the `interlace` filter would introduce.
-            //
-            // Tolerance of 0.05 around 2.0 covers 50/25 (=2.000) and
-            // 59.94/29.97 (=2.000) and 60/29.97 (=2.002), but excludes
-            // 50/29.97 (=1.668) and 59.94/25 (=2.398).
-            let targetFps = standard.frameRateValue
-            let ratio = targetFps > 0 ? sourceFrameRate / targetFps : 0
-            if abs(ratio - 2.0) < 0.05 {
-                vf += ",interlace=scan=tff:lowpass=0"
-            } else {
-                vf += ",setfield=mode=tff"
-            }
-        }
-        vf += ",format=yuv420p"
-
+    func encodeVideo(
+        input: URL,
+        videoOut: URL,
+        workDir: URL,
+        bitrate: Int,
+        standard: VideoStandard,
+        source: MediaInfo,
+        capabilities: Capabilities,
+        twoPass: Bool,
+        logger: RunLogger? = nil,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws {
+        let vf = Self.videoFilterChain(standard: standard, source: source,
+                                       capabilities: capabilities)
+        let x264Joined = Self.x264Params(standard: standard)
         let bitrateK = "\(bitrate / 1000)k"
+        let duration = source.duration
 
         func baseArgs(pass: Int?, passlog: URL?) -> [String] {
             var args: [String] = [
-                "-y",
+                "-hide_banner", "-y",
                 "-i", input.path,
-                "-an", "-sn",
+                "-map", "0:v:0",
+                "-an", "-sn", "-dn",
                 "-vf", vf,
                 "-r", standard.frameRate,
                 "-c:v", "libx264",
@@ -224,7 +218,10 @@ struct BluRayEncoder {
                 "-nostats"
             ]
             if standard.isInterlaced {
-                args += ["-flags", "+ildct+ilme", "-top", "1"]
+                // Field order comes from x264's `tff=1` and the filter
+                // chain. Don't add `-top 1`: ffmpeg 9 rejects it as an
+                // encoder option and refuses to start.
+                args += ["-flags", "+ildct+ilme"]
             }
             if let p = pass, let log = passlog {
                 args += ["-pass", "\(p)", "-passlogfile", log.path]
@@ -233,22 +230,12 @@ struct BluRayEncoder {
         }
 
         if twoPass {
-            let passlog = FileManager.default.temporaryDirectory
-                .appendingPathComponent("bdcomp-\(UUID().uuidString)")
-
-            // Cleanup must run regardless of which pass throws — otherwise
-            // a pass-1 failure leaves the libx264 stats files behind in
-            // /tmp indefinitely. The suffixes below are the exact names
-            // libx264 writes (`<base>-0.log` and `<base>-0.log.mbtree`).
-            defer {
-                let base = passlog.path
-                for suffix in ["-0.log", "-0.log.mbtree"] {
-                    try? FileManager.default.removeItem(atPath: base + suffix)
-                }
-            }
+            // The stats files live in the job's work directory, which the
+            // pipeline deletes on success, failure and cancel alike.
+            let passlog = workDir.appendingPathComponent("x264-pass")
 
             var p1 = baseArgs(pass: 1, passlog: passlog)
-            p1.append("/dev/null")
+            p1 += ["/dev/null"]
             try await runFFmpeg(args: p1, duration: duration, logger: logger,
                                 subprocessName: "ffmpeg video pass 1") { frac in
                 progress(frac * 0.5)
@@ -270,36 +257,87 @@ struct BluRayEncoder {
 
     // MARK: - Audio
 
-    /// AC-3 at the requested bitrate, encoded from a specific source audio
-    /// stream by ffmpeg index. Channel count is clamped to 6 (AC-3's 5.1
-    /// ceiling); 7.1 or 5.1+Lt/Rt sources are downmixed using ffmpeg's
-    /// standard matrix, which folds Lss/Rss (or matrix Lt/Rt) back into
-    /// Ls/Rs. Stereo and mono sources are preserved at their native count.
+    /// ffmpeg arguments (minus `-progress` and the output path) that turn the
+    /// chosen audio source into AC-3. Single streams with more than six
+    /// channels are downmixed to 5.1 by ffmpeg's standard matrix; discrete
+    /// mono tracks are joined into one program in the given channel order.
+    static func audioArguments(
+        source: AudioSource,
+        input: URL,
+        info: MediaInfo,
+        bitrateKbps: Int
+    ) -> [String] {
+        switch source {
+        case .stream(let index):
+            let sourceChannels = info.audioStream(index: index)?.channels ?? 2
+            let channels = min(max(sourceChannels, 1), 6)
+            return [
+                "-i", input.path,
+                "-map", "0:\(index)",
+                "-vn", "-sn", "-dn",
+                "-c:a", "ac3",
+                "-b:a", "\(min(bitrateKbps, maxAC3Bitrate(channels: channels)))k",
+                "-ac", "\(channels)",
+                "-ar", "48000"
+            ]
+        case .discrete(let indices, let order):
+            let inputs = indices.map { "[0:\($0)]" }.joined()
+            let layout: String
+            let channelNames: [String]
+            if indices.count >= 6 {
+                layout = "5.1"
+                switch order {
+                case .smpte: channelNames = ["FL", "FR", "FC", "LFE", "BL", "BR"]
+                case .film:  channelNames = ["FL", "FC", "FR", "BL", "BR", "LFE"]
+                }
+            } else {
+                layout = "stereo"
+                channelNames = ["FL", "FR"]
+            }
+            let used = Array(indices.prefix(channelNames.count))
+            let map = zip(used.indices, channelNames)
+                .map { "\($0).0-\($1)" }
+                .joined(separator: "|")
+            let graph = "\(inputs)join=inputs=\(used.count):channel_layout=\(layout):map=\(map)[aout]"
+            return [
+                "-i", input.path,
+                "-filter_complex", graph,
+                "-map", "[aout]",
+                "-c:a", "ac3",
+                "-b:a", "\(min(bitrateKbps, maxAC3Bitrate(channels: used.count)))k",
+                "-ar", "48000"
+            ]
+        case .silence:
+            return [
+                "-f", "lavfi",
+                "-i", "anullsrc=r=48000:cl=stereo",
+                "-t", String(format: "%.3f", info.duration),
+                "-c:a", "ac3",
+                "-b:a", "192k"
+            ]
+        }
+    }
+
+    /// Stereo and mono AC-3 above 448 kbps wastes disc space and some
+    /// encoders reject it, so cap them.
+    static func maxAC3Bitrate(channels: Int) -> Int {
+        channels >= 3 ? 640 : 448
+    }
+
     func encodeAudio(
         input: URL,
         audioOut: URL,
+        source: AudioSource,
+        info: MediaInfo,
         bitrateKbps: Int,
-        sourceStreamIndex: Int,
-        sourceChannels: Int,
-        duration: Double,
         logger: RunLogger? = nil,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
-        let channels = min(max(sourceChannels, 1), 6)
-        let args: [String] = [
-            "-y",
-            "-i", input.path,
-            "-map", "0:\(sourceStreamIndex)",
-            "-vn", "-sn",
-            "-c:a", "ac3",
-            "-b:a", "\(bitrateKbps)k",
-            "-ac", "\(channels)",
-            "-ar", "48000",
-            "-progress", "pipe:1",
-            "-nostats",
-            audioOut.path
-        ]
-        try await runFFmpeg(args: args, duration: duration, logger: logger,
+        var args = ["-hide_banner", "-y"]
+        args += Self.audioArguments(source: source, input: input, info: info,
+                                    bitrateKbps: bitrateKbps)
+        args += ["-progress", "pipe:1", "-nostats", "-f", "ac3", audioOut.path]
+        try await runFFmpeg(args: args, duration: info.duration, logger: logger,
                             subprocessName: "ffmpeg audio", progress: progress)
     }
 
@@ -324,6 +362,9 @@ struct BluRayEncoder {
                     // which is HH:MM:SS.ffffff — unambiguous across ffmpeg versions.
                     if line.hasPrefix("out_time=") {
                         let v = line.dropFirst("out_time=".count)
+                        // Before the first frame ffmpeg reports "N/A" or a
+                        // negative time; skip those.
+                        if v.hasPrefix("-") || v.hasPrefix("N") { return }
                         let parts = v.split(separator: ":")
                         if parts.count == 3,
                            let h = Double(parts[0]),

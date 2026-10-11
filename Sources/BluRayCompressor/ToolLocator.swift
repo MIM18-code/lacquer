@@ -12,6 +12,9 @@ enum ToolLocatorError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missing(let name, let hint):
+            if ToolLocator.isPackagedApp {
+                return "\(name) is missing from the app. Download the app again and replace this copy."
+            }
             return "\(name) not found on PATH.\n\n\(hint)"
         }
     }
@@ -32,6 +35,25 @@ enum ToolLocator {
     /// recipient of a distributed build doesn't need Homebrew.
     static var bundledToolsDir: URL? {
         Bundle.main.resourceURL?.appendingPathComponent("bin")
+    }
+
+    /// True when running from a built .app bundle rather than `swift run`.
+    static var isPackagedApp: Bool {
+        Bundle.main.bundleURL.pathExtension == "app"
+    }
+
+    /// Asks ffmpeg which optional filters it was built with.
+    static func capabilities(ffmpeg: URL) async -> BluRayEncoder.Capabilities {
+        guard let result = try? await ProcessRunner.run(ffmpeg, arguments: ["-hide_banner", "-filters"]) else {
+            return .none
+        }
+        let names = Set(result.stdout.split(separator: "\n").compactMap { line -> Substring? in
+            let cols = line.split(separator: " ", omittingEmptySubsequences: true)
+            return cols.count >= 2 ? cols[1] : nil
+        })
+        return BluRayEncoder.Capabilities(
+            canTonemapHDR: names.contains("zscale") && names.contains("tonemap")
+        )
     }
 
     static func locate() throws -> ExternalTools {
@@ -57,6 +79,16 @@ enum ToolLocator {
 
     private static func find(_ names: [String], hint: String) throws -> URL {
         let fm = FileManager.default
+
+        // 0. An explicit tools folder, for tests and development builds.
+        if let dir = ProcessInfo.processInfo.environment["DISC_TOOLS_DIR"] {
+            for name in names {
+                let path = (dir as NSString).appendingPathComponent(name)
+                if fm.isExecutableFile(atPath: path) {
+                    return URL(fileURLWithPath: path)
+                }
+            }
+        }
 
         // 1. Bundled tools inside the .app take priority.
         if let bundled = bundledToolsDir {

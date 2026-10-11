@@ -37,7 +37,7 @@ struct BDMVAuthor {
         }
     }
 
-    private static func validatePath(_ url: URL, label: String) throws {
+    static func validatePath(_ url: URL, label: String) throws {
         let p = url.path
         if p.contains("\"") {
             throw AuthorError.unsupportedPath(url, reason: "containing a double-quote (used by the \(label))")
@@ -183,6 +183,7 @@ struct BDMVAuthor {
         chapters: [Double] = [],
         subtitle: SubtitleTrack? = nil,
         languageCode: String = "eng",
+        discLabel: String? = nil,
         logger: RunLogger? = nil
     ) async throws {
         precondition(outputISO.pathExtension.lowercased() == "iso",
@@ -211,6 +212,7 @@ struct BDMVAuthor {
             metaParentDir: parent,
             outputTarget: outputISO,
             bluRayMode: true,
+            discLabel: discLabel,
             logger: logger,
             subprocessName: "tsMuxeR (UDF 2.50 ISO)"
         )
@@ -241,6 +243,7 @@ struct BDMVAuthor {
         metaParentDir: URL,
         outputTarget: URL,
         bluRayMode: Bool,
+        discLabel: String? = nil,
         logger: RunLogger?,
         subprocessName: String
     ) async throws {
@@ -255,7 +258,8 @@ struct BDMVAuthor {
             chapters: chapters,
             subtitle: subtitle,
             language: languageCode,
-            bluRayMode: bluRayMode
+            bluRayMode: bluRayMode,
+            discLabel: discLabel
         )
         try metaText.write(to: metaURL, atomically: true, encoding: .utf8)
         // The meta file is the most useful single artifact for reproducing a
@@ -283,7 +287,7 @@ struct BDMVAuthor {
 
     // MARK: - Meta file
 
-    private func metaFile(
+    func metaFile(
         video: URL,
         audio: URL,
         frameRate: Double,
@@ -292,7 +296,8 @@ struct BDMVAuthor {
         chapters: [Double],
         subtitle: SubtitleTrack?,
         language: String,
-        bluRayMode: Bool
+        bluRayMode: Bool,
+        discLabel: String? = nil
     ) -> String {
         // In `--blu-ray` mode tsMuxeR assigns the standard Blu-ray PIDs
         // automatically (0x1011 for the primary video, 0x1100 for the
@@ -316,6 +321,9 @@ struct BDMVAuthor {
         // is silently dropped by tsMuxeR — emitting it would mislead anyone
         // reading the meta file. Gate on bluRayMode; the coordinator warns
         // the user separately when chapters are configured for M2TS mode.
+        if let discLabel, !discLabel.isEmpty {
+            muxOpts += " --label=\"\(discLabel)\""
+        }
         if !chapters.isEmpty && bluRayMode {
             let formatted = chapters.map { Self.formatChapterTime($0) }.joined(separator: ";")
             muxOpts += " --custom-chapters=\(formatted)"
@@ -378,7 +386,24 @@ struct BDMVAuthor {
         return parts.joined(separator: ", ")
     }
 
-    private static func formatChapterTime(_ seconds: Double) -> String {
+    /// Volume label for the ISO: what a computer shows when the disc is
+    /// inserted. UDF allows more, but uppercase ASCII letters, digits and
+    /// underscores up to 32 characters is what every OS displays cleanly.
+    static func discLabel(for name: String) -> String {
+        let upper = name.uppercased()
+        var out = ""
+        for scalar in upper.unicodeScalars {
+            if ("A"..."Z").contains(scalar) || ("0"..."9").contains(scalar) {
+                out.unicodeScalars.append(scalar)
+            } else if !out.hasSuffix("_") {
+                out += "_"
+            }
+        }
+        let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        return String(trimmed.prefix(32)).isEmpty ? "BLURAY" : String(trimmed.prefix(32))
+    }
+
+    static func formatChapterTime(_ seconds: Double) -> String {
         // Defense-in-depth: NaN, infinity, and negative values are not
         // reachable from any current caller (`ChaptersConfig.chapterTimes`
         // only emits non-negative finite Doubles). But `Int(NaN)` and
