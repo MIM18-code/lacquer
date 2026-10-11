@@ -15,7 +15,16 @@ enum DiscSize: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
-    /// Usable bytes after UDF + BDMV overhead (~2%).
+    /// What the disc holds, as printed on it (BD-25 is 25.0 GB).
+    var capacityBytes: Int64 {
+        switch self {
+        case .bd25: return 25_025_314_816
+        case .bd50: return 50_050_629_632
+        }
+    }
+
+    /// Bytes the encode aims for: capacity less filesystem, BDMV and
+    /// muxing overhead, with margin.
     var usableBytes: Int64 {
         switch self {
         case .bd25: return 23_400_000_000
@@ -358,18 +367,32 @@ struct AudioStreamInfo: Equatable, Sendable, Identifiable {
 
     var isMono: Bool { channels == 1 }
 
-    /// Display string for the stream picker — short and dense.
+    /// Display string for the stream picker: "5.1 PCM, English, “Main mix”".
     var displayLabel: String {
-        var parts: [String] = []
-        parts.append(layout.isEmpty ? "\(channels)ch" : layout)
-        parts.append(codec.uppercased())
+        var parts = ["\(layout.isEmpty ? "\(channels)-channel" : layout) \(Self.codecName(codec))"]
         if let language, !language.isEmpty, language != "und" {
-            parts.append(language)
+            parts.append(Locale.current.localizedString(forLanguageCode: language) ?? language)
         }
         if let title, !title.isEmpty {
             parts.append("“\(title)”")
         }
-        return parts.joined(separator: " · ")
+        return parts.joined(separator: ", ")
+    }
+
+    static func codecName(_ codec: String) -> String {
+        if codec.hasPrefix("pcm_") { return "PCM" }
+        switch codec {
+        case "aac": return "AAC"
+        case "ac3": return "AC-3"
+        case "eac3": return "E-AC-3"
+        case "alac": return "ALAC"
+        case "flac": return "FLAC"
+        case "mp3": return "MP3"
+        case "opus": return "Opus"
+        case "truehd": return "TrueHD"
+        case "dts": return "DTS"
+        default: return codec.uppercased()
+        }
     }
 
     /// True when channel count and layout disagree in a way that suggests the
@@ -465,7 +488,7 @@ struct MediaInfo: Equatable, Sendable {
             return [AudioOption(source: .silence, label: "No audio in source (silent track)")]
         }
         var options = audioStreams.map {
-            AudioOption(source: .stream($0.ffmpegIndex), label: "Track \($0.ffmpegIndex): \($0.displayLabel)")
+            AudioOption(source: .stream($0.ffmpegIndex), label: "Track \($0.ffmpegIndex), \($0.displayLabel)")
         }
         let mono = monoStreams.map(\.ffmpegIndex)
         if mono.count >= 6 {

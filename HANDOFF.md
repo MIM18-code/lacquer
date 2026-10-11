@@ -53,6 +53,8 @@ ffmpeg prints "corrupt input packet" on every tsMuxeR M2TS. This is a false alar
 | `EncodeCoordinator.swift` | UI queue state |
 | `ContentView.swift` | UI |
 | `HeadlessCLI.swift` | `--headless` mode |
+| `Snapshot.swift` | `--snapshot DIR`: renders the window with sample jobs, light and dark, to PNG. Use it to check layout without screen access, and for README/site screenshots |
+| `Menus/DiscMenu.swift` | Contract between the menu designer and the HDMV menu author (both in progress on agent branches) |
 | `Tests/`, `Scripts/e2e_test.sh` | Unit tests, end-to-end release gate |
 | `packaging/` | Runtime build, signing, DMG, notarization; names in `app.env` |
 
