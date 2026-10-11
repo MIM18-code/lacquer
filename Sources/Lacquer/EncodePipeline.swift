@@ -496,7 +496,7 @@ enum AppInfo {
     static var name: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
             ?? (Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String)
-            ?? "Blu-ray Compressor"
+            ?? "Lacquer"
     }
 
     static var version: String {

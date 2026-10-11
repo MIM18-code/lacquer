@@ -1,6 +1,4 @@
-# Blu-ray Compressor
-
-*(Working title. The app is being renamed before its first public release.)*
+# Lacquer
 
 A Mac app that turns a finished film master into a Blu-ray: a BDMV folder, a UDF 2.50 ISO ready for a duplicator, or a single M2TS for Toast. Drop in a ProRes, DNxHR, H.264 or HEVC file, check the queue, press Start.
 
@@ -37,7 +35,7 @@ The ISO is written by tsMuxeR directly. An earlier version wrapped a BDMV folder
 The app binary has a headless mode for scripting and testing:
 
 ```sh
-"/Applications/Blu-ray Compressor.app/Contents/MacOS/BluRayCompressor" --headless \
+/Applications/Lacquer.app/Contents/MacOS/Lacquer --headless \
     --input Film.mov --mode iso --disc bd50 --output-dir ~/Discs
 ```
 
@@ -45,7 +43,7 @@ Run with `--headless` alone for the full option list. `--plan-only` prints the p
 
 ## Building
 
-Needs Xcode (or the Command Line Tools) on an Apple Silicon Mac.
+Needs Xcode (or the Command Line Tools) on an Apple Silicon Mac. The name comes from disc mastering: a lacquer is the master a record or disc is pressed from.
 
 ```sh
 python3 packaging/prepare_runtime.py   # pinned FFmpeg, x264, zimg, tsMuxeR; checks SHA-256
@@ -57,7 +55,7 @@ packaging/make_dmg.sh                  # signed, notarized DMG in packaging/dist
 
 `prepare_runtime.py` builds static ffmpeg and ffprobe with only what the app uses: libx264, zimg for tonemapping, and FFmpeg's own decoders and AC-3 encoder. Nothing is downloaded at run time. `make_dmg.sh` signs with a Developer ID identity when one is in the keychain and notarizes through a notarytool keychain profile; without one it falls back to ad-hoc signing. Names, version and bundle ID live in `packaging/app.env`.
 
-For development, `swift run BluRayCompressor` uses Homebrew's ffmpeg and tsMuxeR if they're on the PATH, or set `DISC_TOOLS_DIR=packaging/vendor/runtime/bin`.
+For development, `swift run Lacquer` uses Homebrew's ffmpeg and tsMuxeR if they're on the PATH, or set `DISC_TOOLS_DIR=packaging/vendor/runtime/bin`.
 
 Intel Macs aren't supported: tsMuxeR's current releases are arm64-only for macOS, and mixing in an old x86_64 build would ship two different tsMuxeR versions.
 

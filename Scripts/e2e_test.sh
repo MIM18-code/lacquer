@@ -10,7 +10,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BIN="${BIN:-.build/debug/BluRayCompressor}"
+BIN="${BIN:-.build/debug/Lacquer}"
 export DISC_TOOLS_DIR="${DISC_TOOLS_DIR:-$PWD/packaging/vendor/runtime/bin}"
 FF="$DISC_TOOLS_DIR/ffmpeg"
 FP="$DISC_TOOLS_DIR/ffprobe"

@@ -2,22 +2,22 @@
 import PackageDescription
 
 let package = Package(
-    name: "BluRayCompressor",
+    name: "Lacquer",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "BluRayCompressor", targets: ["BluRayCompressor"])
+        .executable(name: "Lacquer", targets: ["Lacquer"])
     ],
     targets: [
         .executableTarget(
-            name: "BluRayCompressor",
-            path: "Sources/BluRayCompressor"
+            name: "Lacquer",
+            path: "Sources/Lacquer"
         ),
         .testTarget(
-            name: "BluRayCompressorTests",
-            dependencies: ["BluRayCompressor"],
-            path: "Tests/BluRayCompressorTests"
+            name: "LacquerTests",
+            dependencies: ["Lacquer"],
+            path: "Tests/LacquerTests"
         )
     ]
 )

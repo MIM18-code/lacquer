@@ -1,5 +1,7 @@
 # Handoff: 2026-10-11
 
+The app is now **Lacquer** (bundle ID `com.mindinmotion.lacquer`, repo-to-be `MIM18-code/lacquer`). It was "Blu-ray Compressor" until this session.
+
 State of the project after the session that took it from a one-off build for a friend toward a public MindInMotion release. The May 2026 handoff (29 bug fixes, the UDF 2.50 ISO fix, dropping Intel) is in the baseline commit's copy of this file.
 
 ## Where it stands
@@ -13,7 +15,7 @@ State of the project after the session that took it from a one-off build for a f
 **Packaging** (`packaging/`, done by a subagent):
 - Static ffmpeg/ffprobe 9.0.2 built from pinned sources with only libx264 and zimg. That replaces Homebrew's ffmpeg 8.1 and its 16 dylibs (x265, AV1, VPX, Opus, LAME, OpenSSL…).
 - tsMuxeR 2.7.0 pinned by hash. Developer ID signing with hardened runtime, notarization, stapling, `SHA256SUMS`, and a GPL source archive.
-- `LICENSE` (GPL-3.0) and `THIRD_PARTY_NOTICES.md`. The runtime builds in `~/Library/Caches/bluray-compressor-runtime-build` because FFmpeg's configure breaks on the repo path's spaces.
+- `LICENSE` (GPL-3.0) and `THIRD_PARTY_NOTICES.md`. The runtime builds in `~/Library/Caches/lacquer-runtime-build` because FFmpeg's configure breaks on the repo path's spaces.
 
 **Architecture:** the encode moved out of the UI class into `EncodePipeline` (no UI, cancellable). `EncodePlan` computes bitrate, size and warnings without running anything, so the queue can show problems before a job starts. The app and the headless CLI (`--headless`) both drive the pipeline.
 
@@ -50,10 +52,10 @@ State of the project after the session that took it from a one-off build for a f
 
 ## Before the first public release
 
-1. **Name.** "Compressor" is Apple's product, and "Blu-ray" in a product name needs a BDA license. Change `DISPLAY_NAME`, `BUNDLE_ID`, `DIST_BASENAME` in `packaging/app.env`, the fallback in `AppInfo.name`, and the README title.
+1. **Name clearance.** A web search found no software called Lacquer; a USPTO TSDR search in classes 9 and 42 hasn't been done.
 2. **Hardware test.** Burn a BD-R from each output mode and play it on at least two standalone players. Check chapters, subtitles (PGS render quality hasn't been looked at on a TV), 1080i29.97 PsF cadence, and audio sync over a full feature.
 3. **Real HDR footage.** The tonemap chain is verified on synthetic HLG only.
-4. **App icon** (`packaging/AppIcon.icns` is picked up automatically).
+4. **App icon:** drawn by `packaging/icon/make_icon.py` (writes `packaging/AppIcon.icns`). A designer pass would help, but it's usable.
 5. **Public repo** under MIM18-code, `SOURCE_URL` in `app.env`, then a release with the DMG, the source archive, and ``SHA-256: `<hash>` `` at the end of the notes so mindinmotionsoftware.com picks it up.
 
 ## Roadmap

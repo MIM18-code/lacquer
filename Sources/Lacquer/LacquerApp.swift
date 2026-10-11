@@ -23,12 +23,12 @@ enum Entry {
             }
             withExtendedLifetime(sources) { dispatchMain() }
         } else {
-            BluRayCompressorApp.main()
+            LacquerApp.main()
         }
     }
 }
 
-struct BluRayCompressorApp: App {
+struct LacquerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var coordinator = EncodeCoordinator()
 
