@@ -18,8 +18,6 @@ final class EncodeCoordinator: ObservableObject {
     @Published var tools: ExternalTools?
     @Published var capabilities: BluRayEncoder.Capabilities = .none
     @Published private(set) var stopRequested = false
-    /// Set by File › Add Files…; the window shows its open panel and resets it.
-    @Published var requestAddFiles = false
 
     private var runTask: Task<Void, Never>?
 
@@ -48,6 +46,18 @@ final class EncodeCoordinator: ObservableObject {
     static let videoExtensions: Set<String> = [
         "mov", "mp4", "m4v", "mxf", "mkv", "avi", "mts", "m2ts", "ts", "mpg", "mpeg", "webm"
     ]
+
+    /// File › Add Files… and the toolbar button: pick masters or folders.
+    func chooseAndAddFiles() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.movie, .quickTimeMovie, .mpeg4Movie, .folder]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        let urls = panel.urls
+        Task { await loadInputs(urls) }
+    }
 
     func loadInputs(_ urls: [URL]) async {
         // Expand dropped folders one level so a folder of reels works.
@@ -166,6 +176,7 @@ final class EncodeCoordinator: ObservableObject {
         mutateJob(id: job.id) {
             guard $0.status.canRetry else { return }
             $0.status = .pending
+            $0.startedOutputMode = nil
             $0.stage = .idle
             $0.progress = 0
             $0.errorMessage = nil
@@ -246,8 +257,10 @@ final class EncodeCoordinator: ObservableObject {
         runningJobID = jobID
         defer { runningJobID = nil }
 
+        let request = EncodeRequest(job: job, settings: settings)
         mutateJob(id: jobID) {
             $0.status = .running
+            $0.startedOutputMode = request.settings.outputMode
             $0.stage = .checking
             $0.progress = 0
             $0.startedAt = Date()
@@ -256,7 +269,6 @@ final class EncodeCoordinator: ObservableObject {
         appendLog("")
         appendLog("▶ \(job.inputURL.lastPathComponent)")
 
-        let request = EncodeRequest(job: job, settings: settings)
         let pipeline = EncodePipeline(tools: tools, capabilities: capabilities)
         do {
             let output = try await pipeline.run(

@@ -56,12 +56,14 @@ struct LacquerApp: App {
             }
         }
         .defaultSize(width: 1180, height: 760)
+        // The window can't be dragged smaller than the designer's layout.
+        .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About \(AppInfo.name)") { AppDelegate.showAbout() }
             }
             CommandGroup(replacing: .newItem) {
-                Button("Add Files…") { coordinator.requestAddFiles = true }
+                Button("Add Files…") { coordinator.chooseAndAddFiles() }
                     .keyboardShortcut("o", modifiers: .command)
             }
             CommandMenu("Queue") {

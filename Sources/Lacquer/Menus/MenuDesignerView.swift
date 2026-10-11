@@ -89,7 +89,9 @@ struct MenuDesignerView: View {
             }
         }
         .padding(20)
-        .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
+        // 520 + divider + the 310-pt settings column fits the window's
+        // 840-pt minimum, so nothing is pushed off the right edge.
+        .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .underPageBackgroundColor))
     }
 
