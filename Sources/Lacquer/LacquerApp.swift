@@ -6,6 +6,12 @@ import AppKit
 @main
 enum Entry {
     static func main() {
+        #if DEBUG
+        if MenuDebug.isMenuCommand(CommandLine.arguments) {
+            MenuDebug.run(CommandLine.arguments)
+            return
+        }
+        #endif
         if CommandLine.arguments.contains("--headless") {
             let task = Task {
                 let code = await HeadlessCLI.run(Array(CommandLine.arguments.dropFirst()))
