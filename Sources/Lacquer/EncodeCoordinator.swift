@@ -137,6 +137,16 @@ final class EncodeCoordinator: ObservableObject {
         mutateEditable(jobID) { $0.audioSource = source }
     }
 
+    func setMenu(_ menu: MenuTemplate?, for jobID: UUID) {
+        mutateEditable(jobID) { $0.menu = menu }
+    }
+
+    /// Chapter times for a job under the current settings; the menu's scene
+    /// pages follow them.
+    func chapters(for job: EncodeJob) -> [Double] {
+        settings.chapters.chapterTimes(duration: job.mediaInfo.duration)
+    }
+
     func setStandardOverride(_ standard: VideoStandard?, for jobID: UUID) {
         mutateEditable(jobID) { $0.standardOverride = standard }
     }

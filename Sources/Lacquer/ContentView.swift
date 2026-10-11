@@ -15,6 +15,7 @@ struct ContentView: View {
     @EnvironmentObject private var coordinator: EncodeCoordinator
     @State private var isDropTargeted = false
     @State private var showActivity = false
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         NavigationSplitView {
@@ -135,7 +136,15 @@ struct ContentView: View {
                             onClearSubtitle: { coordinator.setSubtitle(nil, for: job.id) },
                             onSelectAudio: { coordinator.setAudioSource($0, for: job.id) },
                             onSelectStandard: { coordinator.setStandardOverride($0, for: job.id) },
-                            onSelectSubtitleLanguage: { coordinator.setSubtitleLanguage($0, for: job.id) }
+                            onSelectSubtitleLanguage: { coordinator.setSubtitleLanguage($0, for: job.id) },
+                            onEditMenu: {
+                                if job.menu == nil {
+                                    coordinator.setMenu(.suggested(forFilm: job.inputURL, duration: job.mediaInfo.duration),
+                                                        for: job.id)
+                                }
+                                openWindow(id: "menu", value: job.id)
+                            },
+                            onRemoveMenu: { coordinator.setMenu(nil, for: job.id) }
                         )
                         Divider().padding(.leading, 70)
                     }
@@ -284,6 +293,42 @@ struct ContentView: View {
     private func reveal(_ url: URL?) {
         guard let url else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+}
+
+// MARK: - Menu designer window
+
+/// Hosts the menu designer for one job in its own window. Edits go straight
+/// to the job; the window closes itself if the job leaves the queue.
+struct MenuDesignerWindow: View {
+    let jobID: UUID
+    @EnvironmentObject private var coordinator: EncodeCoordinator
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        if let job = coordinator.jobs.first(where: { $0.id == jobID }),
+           let ffmpeg = coordinator.tools?.ffmpeg {
+            let info = job.mediaInfo
+            MenuDesignerView(
+                template: Binding(
+                    get: { coordinator.jobs.first { $0.id == jobID }?.menu
+                        ?? .suggested(forFilm: job.inputURL, duration: info.duration) },
+                    set: { coordinator.setMenu($0, for: jobID) }
+                ),
+                film: job.inputURL,
+                chapters: coordinator.chapters(for: job),
+                ffmpeg: ffmpeg,
+                hasSubtitles: job.subtitleURL != nil,
+                hdrTransfer: info.isHDR && coordinator.capabilities.canTonemapHDR ? info.colorTransfer : nil
+            )
+            .navigationTitle("Menu for \(job.inputURL.lastPathComponent)")
+            .disabled(!job.status.isEditable)
+        } else {
+            Text("This disc is no longer in the queue.")
+                .foregroundStyle(.secondary)
+                .frame(width: 400, height: 200)
+                .onAppear { dismiss() }
+        }
     }
 }
 
@@ -540,6 +585,8 @@ struct JobRow: View {
     let onSelectAudio: (AudioSource) -> Void
     let onSelectStandard: (VideoStandard?) -> Void
     let onSelectSubtitleLanguage: (String) -> Void
+    var onEditMenu: () -> Void = {}
+    var onRemoveMenu: () -> Void = {}
 
     @State private var isHovered = false
 
@@ -796,6 +843,31 @@ struct JobRow: View {
                         Text("Viewers can turn them on and off.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if Features.discMenus {
+                GridRow {
+                    fieldLabel("Menu")
+                    if let menu = job.menu {
+                        HStack(spacing: 8) {
+                            Text("\(menu.style.displayName)\(menu.title.isEmpty ? "" : ", “\(menu.title)”")")
+                                .font(.callout)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .frame(maxWidth: 260, alignment: .leading)
+                                .fixedSize(horizontal: true, vertical: false)
+                            Button("Edit…", action: onEditMenu)
+                            Button("Remove", action: onRemoveMenu)
+                                .buttonStyle(.link)
+                        }
+                    } else {
+                        HStack(spacing: 8) {
+                            Button("Add Menu…", action: onEditMenu)
+                            Text("Without one, the disc plays as soon as it's inserted.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

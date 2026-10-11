@@ -21,12 +21,18 @@ enum MenuRenderError: LocalizedError {
 /// so editing text doesn't re-seek the film.
 actor FrameStore {
     private let ffmpeg: URL
+    /// The film's HDR transfer ("smpte2084", "arib-std-b67") when stills
+    /// need tonemapping to SDR, or nil.
+    private let hdrTransfer: String?
     private var cache: [String: CGImage] = [:]
     private var order: [String] = []
     private var bytes = 0
     private let byteLimit = 240_000_000
 
-    init(ffmpeg: URL) { self.ffmpeg = ffmpeg }
+    init(ffmpeg: URL, hdrTransfer: String? = nil) {
+        self.ffmpeg = ffmpeg
+        self.hdrTransfer = hdrTransfer
+    }
 
     /// A frame scaled to fit within `box`, keeping the film's shape (pixel
     /// aspect applied).
@@ -38,7 +44,7 @@ actor FrameStore {
             order.append(key)
             return hit
         }
-        let image = try await Self.grab(ffmpeg: ffmpeg, film: film, at: t, box: box)
+        let image = try await Self.grab(ffmpeg: ffmpeg, film: film, at: t, box: box, hdrTransfer: hdrTransfer)
         try Task.checkCancellation()
         cache[key] = image
         order.append(key)
@@ -67,11 +73,13 @@ actor FrameStore {
         return h * 3600 + m * 60 + s
     }
 
-    private static func grab(ffmpeg: URL, film: URL, at seconds: Double, box: CGSize) async throws -> CGImage {
+    private static func grab(ffmpeg: URL, film: URL, at seconds: Double, box: CGSize,
+                             hdrTransfer: String?) async throws -> CGImage {
         let out = FileManager.default.temporaryDirectory
             .appendingPathComponent("lacquer-menu-\(UUID().uuidString).png")
         defer { try? FileManager.default.removeItem(at: out) }
-        let filter = "scale=w=trunc(iw*sar/2)*2:h=ih,setsar=1,"
+        let tonemap = hdrTransfer.map { BluRayEncoder.tonemapFilters(transfer: $0).joined(separator: ",") + "," } ?? ""
+        let filter = tonemap + "scale=w=trunc(iw*sar/2)*2:h=ih,setsar=1,"
             + "scale=\(Int(box.width)):\(Int(box.height)):force_original_aspect_ratio=decrease:flags=lanczos"
         do {
             try await ProcessRunner.run(ffmpeg, arguments: [
@@ -103,8 +111,8 @@ final class MenuRenderer: Sendable {
     static let thumbnailOffset = 1.0
     static let thumbnailBox = CGSize(width: 640, height: 360)
 
-    init(ffmpeg: URL) {
-        frames = FrameStore(ffmpeg: ffmpeg)
+    init(ffmpeg: URL, hdrTransfer: String? = nil) {
+        frames = FrameStore(ffmpeg: ffmpeg, hdrTransfer: hdrTransfer)
     }
 
     func render(template: MenuTemplate, film: URL, chapters: [Double], hasSubtitles: Bool) async throws -> DiscMenu {
@@ -377,6 +385,18 @@ enum MenuArt {
             let size = max(32, style.labelFont.size * thumb.width / total)
             sceneBlock = TypeBlock.line(scene, font: style.labelFont.sized(size))
             timeBlock = time.map { TypeBlock.line($0, font: style.labelFont.sized(size)) }
+        }
+        // A long scene name that still doesn't fit at the smallest legible
+        // size loses characters from the end.
+        let timeWidth = timeBlock.map { gap + $0.width } ?? 0
+        if sceneBlock.width + timeWidth > thumb.width {
+            let font = style.labelFont.sized(max(32, sceneBlock.fontSize))
+            var chars = Array(scene)
+            while chars.count > 1 {
+                chars.removeLast()
+                let candidate = TypeBlock.line(String(chars).trimmingCharacters(in: .whitespaces) + "…", font: font)
+                if candidate.width + timeWidth <= thumb.width { sceneBlock = candidate; break }
+            }
         }
         let top = thumb.maxY + 12
         c.draw(sceneBlock, atX: thumb.minX, top: top, color: sceneColor)

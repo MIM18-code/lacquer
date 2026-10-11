@@ -49,6 +49,13 @@ struct LacquerApp: App {
                 .frame(minWidth: 860, minHeight: 680)
                 .onAppear { appDelegate.coordinator = coordinator }
         }
+        WindowGroup("Menu", id: "menu", for: UUID.self) { $jobID in
+            if let jobID {
+                MenuDesignerWindow(jobID: jobID)
+                    .environmentObject(coordinator)
+            }
+        }
+        .defaultSize(width: 1180, height: 760)
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About \(AppInfo.name)") { AppDelegate.showAbout() }

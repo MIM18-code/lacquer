@@ -521,6 +521,21 @@ struct MediaInfo: Equatable, Sendable {
     }
 }
 
+// MARK: - Feature flags
+
+enum Features {
+    /// Disc menus: the designer works, but authoring them onto the disc is
+    /// still being built. On in debug builds, or with
+    /// `defaults write com.mindinmotion.lacquer enableDiscMenus -bool YES`.
+    static var discMenus: Bool {
+        #if DEBUG
+        return true
+        #else
+        return UserDefaults.standard.bool(forKey: "enableDiscMenus")
+        #endif
+    }
+}
+
 // MARK: - Job
 
 enum JobStatus: String, Equatable, Sendable {
@@ -557,6 +572,8 @@ struct EncodeJob: Identifiable, Equatable, Sendable {
     /// ISO 639-2/B language code (3-letter) tagged on the PGS track. Players
     /// that filter subtitle tracks by preferred language need this to match.
     var subtitleLanguageCode: String = "eng"
+    /// On-screen disc menu, or nil for a disc that plays straight away.
+    var menu: MenuTemplate?
     var status: JobStatus = .pending
     var stage: EncodeStage = .idle
     var progress: Double = 0

@@ -15,6 +15,16 @@ struct MenuTemplate: Codable, Equatable, Sendable {
     var includeScenes: Bool = true
     var includeSubtitles: Bool = true
     var scenePages = ScenePageSettings()
+    /// Names for the scene buttons, by chapter. A blank or missing entry
+    /// falls back to "Scene N". Blu-ray chapters themselves have no names;
+    /// these only appear on the menu.
+    var sceneNames: [String] = []
+
+    func sceneName(_ chapter: Int) -> String {
+        let name = chapter < sceneNames.count
+            ? sceneNames[chapter].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        return name.isEmpty ? "Scene \(chapter + 1)" : name
+    }
 
     /// A starting template for a film: the file name as the title and a
     /// background frame a quarter of the way in, which is usually past the

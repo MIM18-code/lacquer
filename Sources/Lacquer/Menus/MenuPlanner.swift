@@ -131,7 +131,8 @@ enum MenuPlanner {
 
         var pages = [mainPage(template: template, style: style, showScenes: showScenes, showSubtitles: showSubtitles)]
         for p in 0..<pageCount {
-            pages.append(scenesPage(index: p, of: pageCount, chapters: chapters, settings: settings, style: style))
+            pages.append(scenesPage(index: p, of: pageCount, chapters: chapters, settings: settings, style: style,
+                                    name: template.sceneName))
         }
         return MenuPlan(style: style, pages: pages, hasScenes: showScenes, hasSubtitles: showSubtitles)
     }
@@ -262,7 +263,8 @@ enum MenuPlanner {
     // MARK: Scene pages
 
     private static func scenesPage(index: Int, of pageCount: Int, chapters: [Double],
-                                   settings: ScenePageSettings, style: MenuStyle) -> PlannedPage {
+                                   settings: ScenePageSettings, style: MenuStyle,
+                                   name: (Int) -> String) -> PlannedPage {
         let safe = MenuGeometry.titleSafe
         let perPage = settings.perPage
         let first = index * perPage
@@ -331,7 +333,7 @@ enum MenuPlanner {
             let thumb = CGRect(x: rect.minX + ringMargin, y: rect.minY + ringMargin, width: thumbW, height: thumbH)
             buttons.append(PlannedButton(
                 rect: rect,
-                content: .scene(chapter: chapter, thumb: thumb, scene: "Scene \(chapter + 1)",
+                content: .scene(chapter: chapter, thumb: thumb, scene: name(chapter),
                                 time: settings.showTimes ? timeString(chapters[chapter]) : nil),
                 action: .playChapter(chapter)))
         }
