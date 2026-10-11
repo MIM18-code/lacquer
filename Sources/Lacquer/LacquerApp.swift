@@ -125,14 +125,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
         // Let the job stop and clean up before the app goes away; give up
         // waiting after ten seconds so Quit always works.
-        Task { @MainActor in
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask { await coordinator.stopAndWait() }
-                group.addTask { try? await Task.sleep(nanoseconds: 10_000_000_000) }
-                await group.next()
-                group.cancelAll()
-            }
+        // Reply when cleanup finishes or after ten seconds, whichever comes
+        // first. A plain deadline rather than a task group: a group waits for
+        // every child, so a stuck cleanup would hold Quit forever.
+        let replied = Locked(false)
+        func replyOnce() {
+            guard !replied.swap(true) else { return }
             NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        Task { @MainActor in
+            await coordinator.stopAndWait()
+            replyOnce()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+            ProcessRunner.terminateAll()
+            replyOnce()
         }
         return .terminateLater
     }

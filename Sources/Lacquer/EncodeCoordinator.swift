@@ -20,6 +20,9 @@ final class EncodeCoordinator: ObservableObject {
     @Published private(set) var stopRequested = false
 
     private var runTask: Task<Void, Never>?
+    /// Files being probed right now, so the same file added twice at once
+    /// (Open With plus a drop) becomes one job.
+    private var loading: Set<URL> = []
 
     var isRunning: Bool { runTask != nil }
     var hasPendingJobs: Bool { jobs.contains { $0.status == .pending } }
@@ -91,9 +94,12 @@ final class EncodeCoordinator: ObservableObject {
         guard let tools else {
             return "The encoding tools weren't found, so \(url.lastPathComponent) can't be read."
         }
-        if jobs.contains(where: { $0.inputURL == url && $0.status != .done }) {
+        let key = url.standardizedFileURL
+        if loading.contains(key) || jobs.contains(where: { $0.inputURL.standardizedFileURL == key && $0.status != .done }) {
             return nil
         }
+        loading.insert(key)
+        defer { loading.remove(key) }
         do {
             let info = try await MediaProbe(ffprobe: tools.ffprobe).probe(url)
             let job = EncodeJob(inputURL: url, mediaInfo: info)
@@ -177,6 +183,7 @@ final class EncodeCoordinator: ObservableObject {
             guard $0.status.canRetry else { return }
             $0.status = .pending
             $0.startedOutputMode = nil
+            $0.startedStandard = nil
             $0.stage = .idle
             $0.progress = 0
             $0.errorMessage = nil
@@ -265,6 +272,7 @@ final class EncodeCoordinator: ObservableObject {
         mutateJob(id: jobID) {
             $0.status = .running
             $0.startedOutputMode = request.settings.outputMode
+            $0.startedStandard = request.standard
             $0.stage = .checking
             $0.progress = 0
             $0.startedAt = Date()

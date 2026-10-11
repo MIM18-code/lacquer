@@ -324,7 +324,6 @@ struct BluRayEncoder {
                 "-ar", "48000"
             ]
         case .discrete(let indices, let order):
-            let inputs = indices.map { "[0:\($0)]" }.joined()
             let layout: String
             let channelNames: [String]
             if indices.count >= 6 {
@@ -341,12 +340,17 @@ struct BluRayEncoder {
             let map = zip(used.indices, channelNames)
                 .map { "\($0).0-\($1)" }
                 .joined(separator: "|")
-            var graph = "\(inputs)join=inputs=\(used.count):channel_layout=\(layout):map=\(map)"
-            if let sync = syncFilter(audioStart: info.audioStream(index: used[0])?.startTime ?? 0,
-                                     videoStart: info.videoStartTime) {
-                graph += ",\(sync)"
+            // Line each track up with the picture before joining: separately
+            // exported mono tracks can start at different times, and one
+            // offset for the joined program would shift the others.
+            let aligned = used.enumerated().map { k, index -> String in
+                let sync = syncFilter(audioStart: info.audioStream(index: index)?.startTime ?? 0,
+                                      videoStart: info.videoStartTime)
+                return "[0:\(index)]\(sync.map { "\($0)," } ?? "")asetpts=PTS-STARTPTS[a\(k)]"
             }
-            graph += "[aout]"
+            let joined = used.indices.map { "[a\($0)]" }.joined()
+            let graph = aligned.joined(separator: ";") + ";"
+                + "\(joined)join=inputs=\(used.count):channel_layout=\(layout):map=\(map)[aout]"
             return [
                 "-i", input.path,
                 "-filter_complex", graph,
