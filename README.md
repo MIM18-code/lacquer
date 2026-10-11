@@ -18,7 +18,17 @@ Free and open source under GPL-3.0. Apple Silicon Macs with macOS 13 or later.
 - **A queue you can stop.** Stop ends the current job and deletes its partial output. Quitting mid-encode asks first and kills ffmpeg instead of leaving it running. The Mac stays awake while the queue runs.
 - **A log for every job** next to its output, with every ffmpeg and tsMuxeR command, their full output, and the encode plan.
 
-No on-screen menus yet. Discs auto-play, and chapters give Next/Prev on the remote. For menus, use the M2TS output and author it in Toast.
+## Disc menus
+
+Add a menu to any disc from its row in the queue. The designer opens in its own window, with a preview drawn the way a TV will show it:
+
+- **Three styles.** Full Frame puts your still edge to edge with a quiet title low on the left. Title Card gives a widescreen band with a centred title and buttons in the black bar below. Typographic sets big type on a dark page, with the still faded in on the right.
+- **The background** is any frame of the film, picked with a slider, or an image file such as your poster. HDR masters are tonemapped first.
+- **Buttons:** Play, Scenes (when the film has chapters), and Subtitles On and Off (when the disc has subtitles).
+- **Scene pages** with a thumbnail per chapter, named however you like, paged when there are more than fit.
+- **Remote navigation** worked out from the layout, so the arrow keys move where your eye expects. Click the preview and try it with the arrow keys.
+
+The menu is real Blu-ray HDMV navigation. First Play and Top Menu open it, and a scene button starts the film on that chapter's exact frame. Lacquer writes the menu clips, interactive graphics and navigation files itself, then the UDF 2.50 image for ISO output; tsMuxeR still muxes the film. Without a menu, the disc plays the film as soon as it's inserted. Menus are checked with libbluray, the library VLC uses for Blu-ray menus (`Scripts/menu-check`); try a burned disc on your own player before a duplication run.
 
 ## Output modes
 
@@ -26,7 +36,7 @@ No on-screen menus yet. Discs auto-play, and chapters give Next/Prev on the remo
 |---|---|---|
 | BDMV Folder | `Film_BluRay/BDMV/…` | Burn with Toast or another authoring tool |
 | ISO Disc Image | `Film_BluRay.iso`, UDF 2.50, written by tsMuxeR | Upload to a duplicator or `hdiutil burn` |
-| M2TS File Only | `Film_BluRay.m2ts` | Author menus in Toast |
+| M2TS File Only | `Film_BluRay.m2ts` | Hand to Toast or another authoring tool (no menu or chapters) |
 
 The ISO is written by tsMuxeR directly. An earlier version wrapped a BDMV folder with `hdiutil makehybrid`, which silently produced UDF 1.50 images that played on computers but failed on hardware players.
 
