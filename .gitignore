@@ -1,0 +1,11 @@
+.build/
+.swiftpm/
+xcuserdata/
+*.xcworkspace
+DerivedData/
+.DS_Store
+build/
+*.dmg
+*.zip
+packaging/vendor/
+packaging/dist/
