@@ -69,6 +69,13 @@ struct NavCommand: Equatable, Sendable {
     static func selectButton(_ button: Int) -> NavCommand {
         NavCommand(opcode: 0x51C0_0003, destination: 0x8000_0000 | UInt32(button & 0xFFFF), source: 0)
     }
+
+    /// SetButtonPage in a movie object: stores the button to select (PSR10)
+    /// and the IG page to show (PSR11) for the next menu that opens.
+    static func setButtonPage(button: Int, page: Int) -> NavCommand {
+        NavCommand(opcode: 0x51C0_0003, destination: 0x8000_0000 | UInt32(button & 0xFFFF),
+                   source: 0x8000_0000 | UInt32(page & 0xFF))
+    }
 }
 
 struct MovieObject: Equatable, Sendable {
