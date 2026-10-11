@@ -443,4 +443,171 @@ final class MenuTests: XCTestCase {
             XCTAssertNotNil(error.errorDescription)
         }
     }
+
+    // MARK: Very long text (review #10)
+
+    func testExtremelyLongTitlesAndSubtitlesStayInsideTitleSafeAndClearOfButtons() {
+        let words = "This film has a very long title "
+        let spaced = String(String(repeating: words, count: 40).prefix(1200))
+        let unbroken = String(repeating: "W", count: 1200)
+        let longSubtitle = String(String(repeating: "Official Selection of the Somewhere Film Festival ", count: 12).prefix(600))
+        let safe = MenuGeometry.titleSafe
+        for style in MenuStylePreset.allCases {
+            for title in [spaced, unbroken] {
+                for subtitle in ["", longSubtitle] {
+                    for n in [1, 5, 13] {
+                        var t = template(style, title: title, subtitle: subtitle)
+                        t.scenePages = ScenePageSettings()
+                        let p = MenuPlanner.plan(template: t, chapters: chapters(n), hasSubtitles: true)
+                        let page = p.pages[0]
+                        let label = "\(style) subtitle=\(subtitle.count) n=\(n)"
+                        let texts = page.texts
+                        XCTAssertTrue(texts.contains { $0.role == .title }, label)
+                        for text in texts {
+                            XCTAssertTrue(safe.insetBy(dx: -0.5, dy: -0.5).contains(text.bounds),
+                                          "\(label): \(text.role) at \(text.bounds) leaves title-safe")
+                            for b in page.buttons {
+                                XCTAssertFalse(b.rect.intersects(text.bounds),
+                                               "\(label): \(text.role) \(text.bounds) hits button \(b.rect)")
+                            }
+                        }
+                        for (i, a) in texts.enumerated() {
+                            for b in texts[(i + 1)...] {
+                                XCTAssertFalse(a.bounds.intersects(b.bounds), "\(label): \(a.role) overlaps \(b.role)")
+                            }
+                        }
+                        for d in page.decor {
+                            XCTAssertTrue(safe.contains(d.rect), label)
+                            for text in texts where d.role == .accentBar && style == .titleCard {
+                                XCTAssertFalse(d.rect.intersects(text.bounds), "\(label): rule crosses \(text.role)")
+                            }
+                        }
+                        // Cut text says so.
+                        if let title = texts.first(where: { $0.role == .title }) {
+                            XCTAssertLessThanOrEqual(title.block.lines.count, 5)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func testFittingEllipsizesOnceTheMinimumSizeIsReached() {
+        let font = MenuFont(face: .named("AvenirNext-Medium"), size: 100)
+        let text = String(repeating: "Another very long sentence goes here. ", count: 40)
+        let block = TypeBlock.fitting(text, font: font, tracking: 0, maxWidth: 800, maxHeight: 250,
+                                      maxLines: 2, minSize: 50, lineHeight: 1.1)
+        XCTAssertLessThanOrEqual(block.lines.count, 2)
+        XCTAssertLessThanOrEqual(block.height, 250)
+        XCTAssertLessThanOrEqual(block.width, 800.5)
+        XCTAssertEqual(block.fontSize, 50)
+
+        // Text that fits is returned untouched at full size.
+        let short = TypeBlock.fitting("Short", font: font, tracking: 0, maxWidth: 800, maxHeight: 250,
+                                      maxLines: 2, minSize: 50, lineHeight: 1.1)
+        XCTAssertEqual(short.fontSize, 100)
+        XCTAssertEqual(short.lines.count, 1)
+    }
+
+    // MARK: Interlaced masters (review #11)
+
+    private func ffmpegForTests() -> URL? {
+        var candidates = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
+        if let dir = ProcessInfo.processInfo.environment["DISC_TOOLS_DIR"] { candidates.insert(dir + "/ffmpeg", at: 0) }
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+    }
+
+    func testInterlacedMasterStillsAreDeinterlaced() async throws {
+        guard let ffmpeg = ffmpegForTests() else { throw XCTSkip("no ffmpeg available") }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lacquer-menu-ilace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Alternating white and black 50 fps frames woven into bottom-field-first
+        // interlaced frames: every other row is white, every other black.
+        let film = dir.appendingPathComponent("interlaced.mov")
+        do {
+            try await ProcessRunner.run(ffmpeg, arguments: [
+                "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+                "-i", "nullsrc=s=1920x1080:r=50:d=2,format=gray,geq=lum='255*mod(N,2)'",
+                "-vf", "tinterlace=mode=interleave_top,format=yuv422p10le",
+                "-c:v", "prores_ks", "-profile:v", "0", "-flags", "+ildct+ilme", film.path
+            ])
+        } catch {
+            throw XCTSkip("can't build the interlaced fixture with this ffmpeg: \(error.localizedDescription)")
+        }
+
+        func rowMeans(_ image: CGImage) -> [Double] {
+            let bytes = MenuImageIO.straightRGBA(image)
+            return (100..<140).map { row in
+                var sum = 0.0
+                for x in 0..<image.width { sum += Double(bytes[(row * image.width + x) * 4]) }
+                return sum / Double(image.width)
+            }
+        }
+        let box = CGSize(width: 1920, height: 1080)
+        let combed = rowMeans(try await FrameStore(ffmpeg: ffmpeg).frame(film: film, at: 0.6, fitting: box))
+        XCTAssertGreaterThan(abs(combed[0] - combed[1]), 200, "fixture should show the row pattern without deinterlacing")
+
+        let clean = rowMeans(try await FrameStore(ffmpeg: ffmpeg, deinterlace: true).frame(film: film, at: 0.6, fitting: box))
+        XCTAssertLessThan(clean.max()! - clean.min()!, 20, "row means still alternate: \(clean.prefix(6))")
+
+        // And through the renderer's own initialiser.
+        let viaRenderer = rowMeans(try await MenuRenderer(ffmpeg: ffmpeg, deinterlace: true).frames
+            .frame(film: film, at: 0.6, fitting: box))
+        XCTAssertLessThan(viaRenderer.max()! - viaRenderer.min()!, 20)
+    }
+
+    // MARK: Designer busy state (review #12)
+
+    @MainActor
+    func testBusyIndicatorClearsWhenSwitchingBackToACachedPage() async throws {
+        let t = template(.fullFrame)
+        let ch = chapters(8)
+        let full = MenuRenderer.compose(template: t, chapters: ch, hasSubtitles: false, still: still(), thumbnails: [:])
+        let model = MenuDesignerModel(ffmpeg: URL(fileURLWithPath: "/nonexistent")) { index, _, _, _, _ in
+            // The scene page takes a while and, like page composition, doesn't notice cancellation.
+            if index == 1 { try? await Task.sleep(nanoseconds: 400_000_000) }
+            return full.pages[index]
+        }
+        model.debounceNanoseconds = 1_000_000
+        let film = URL(fileURLWithPath: "/nonexistent/film.mp4")
+
+        await model.refresh(template: t, film: film, chapters: ch, hasSubtitles: false, page: 0)
+        XCTAssertNotNil(model.displayed)
+        XCTAssertFalse(model.isRendering)
+
+        let slow = Task { @MainActor in
+            await model.refresh(template: t, film: film, chapters: ch, hasSubtitles: false, page: 1)
+        }
+        var waited = 0
+        while !model.isRendering, waited < 200 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            waited += 1
+        }
+        XCTAssertTrue(model.isRendering, "the scene page should be rendering")
+
+        // Select Main Menu again: the view cancels the page-1 request and asks for page 0, which is cached.
+        slow.cancel()
+        await model.refresh(template: t, film: film, chapters: ch, hasSubtitles: false, page: 0)
+        XCTAssertFalse(model.isRendering, "cached replacement must retire the busy state")
+
+        // The cancelled render finishing late must not turn it back on.
+        await slow.value
+        XCTAssertFalse(model.isRendering)
+
+        // A cancelled render with nothing after it also clears.
+        model.pageIndex = 1
+        let lone = Task { @MainActor in
+            await model.refresh(template: t, film: film, chapters: ch, hasSubtitles: false, page: 1)
+        }
+        waited = 0
+        while !model.isRendering, waited < 200 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            waited += 1
+        }
+        lone.cancel()
+        await lone.value
+        XCTAssertFalse(model.isRendering)
+    }
 }

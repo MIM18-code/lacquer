@@ -336,20 +336,39 @@ struct TypeBlock {
                          pitch: font.size * lineHeight, fontSize: font.size)
     }
 
-    /// Shrinks the font until the text fits `maxWidth` in at most `maxLines`
-    /// lines and `maxHeight` tall, down to `minSize`.
+    /// Fits `text` in `maxWidth`, at most `maxLines` lines and `maxHeight`
+    /// tall. Shrinks the font down to `minSize` first. If it still doesn't
+    /// fit, cuts the text and ends it with an ellipsis, so the result always
+    /// stays inside the limits however long the text is.
     static func fitting(_ text: String, font: MenuFont, tracking: CGFloat, trackingScalesWithSize: Bool = true,
                         maxWidth: CGFloat, maxHeight: CGFloat, maxLines: Int, minSize: CGFloat,
                         lineHeight: CGFloat) -> TypeBlock {
-        var size = font.size
-        var block = layout(text, font: font, tracking: tracking, maxWidth: maxWidth, lineHeight: lineHeight)
-        while size > minSize,
-              block.lines.count > maxLines || block.height > maxHeight || block.width > maxWidth + 0.5 {
-            size = max(minSize, size - 4)
-            let t = trackingScalesWithSize ? tracking * size / font.size : tracking
-            block = layout(text, font: font.sized(size), tracking: t, maxWidth: maxWidth, lineHeight: lineHeight)
+        func fits(_ b: TypeBlock) -> Bool {
+            b.lines.count <= max(1, maxLines) && b.height <= maxHeight + 0.01 && b.width <= maxWidth + 0.5
         }
-        return block
+        var size = font.size
+        var currentTracking = tracking
+        var block = layout(text, font: font, tracking: tracking, maxWidth: maxWidth, lineHeight: lineHeight)
+        while size > minSize, !fits(block) {
+            size = max(minSize, size - 4)
+            currentTracking = trackingScalesWithSize ? tracking * size / font.size : tracking
+            block = layout(text, font: font.sized(size), tracking: currentTracking, maxWidth: maxWidth, lineHeight: lineHeight)
+        }
+        if fits(block) { return block }
+
+        // Still too big at the smallest size: keep the longest prefix that fits with an ellipsis.
+        let chars = Array(text)
+        let sized = font.sized(size)
+        func candidate(_ k: Int) -> TypeBlock {
+            let head = String(chars[0..<k]).trimmingCharacters(in: .whitespacesAndNewlines)
+            return layout(head + "\u{2026}", font: sized, tracking: currentTracking, maxWidth: maxWidth, lineHeight: lineHeight)
+        }
+        var lo = 0, hi = chars.count
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if fits(candidate(mid)) { lo = mid } else { hi = mid - 1 }
+        }
+        return candidate(lo)
     }
 }
 
