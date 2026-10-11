@@ -38,6 +38,7 @@ final class NavCommandTests: XCTestCase {
         XCTAssertEqual(NavCommand.setSubtitleStream(1, displayed: true).bytes, hex("51c000010000c00100000000"))
         XCTAssertEqual(NavCommand.setSubtitleStream(1, displayed: false).bytes, hex("51c000010000800100000000"))
         XCTAssertEqual(NavCommand.selectButton(2).bytes, hex("51c000038000000200000000"))
+        XCTAssertEqual(NavCommand.setButtonPage(button: 1, page: 0).bytes, hex("51c000038000000180000000"))
     }
 }
 
@@ -286,6 +287,11 @@ final class IGSEncoderTests: XCTestCase {
         XCTAssertEqual(joined.count, rle.count + 7)
     }
 
+    func testNoDefaultButtonLeavesItToPSR10() throws {
+        let set = try IGSEncoder.displaySet(buttons: [button(100, commands: [])], defaultButton: nil)
+        XCTAssertEqual(u16(set.segments[0].bytes, 45), 0xFFFF)
+    }
+
     func testTimestampsRespectDecodeOrder() throws {
         var set = try IGSEncoder.displaySet(buttons: [button(100, commands: [])], defaultButton: 0)
         let arrivals = set.segments.indices.map { Int64(54_000_000 + 100 * $0) }
@@ -419,8 +425,8 @@ final class MenuNavigationTests: XCTestCase {
             .playPlaylist(0), .jumpObject(1)
         ])
         XCTAssertTrue(nav.objects[0].resumeIntention)
-        XCTAssertEqual(nav.objects[1].commands, [.playPlaylist(1000), .goto(0)])
-        XCTAssertEqual(nav.objects[2].commands, [.playPlaylist(1001), .goto(0)])
+        XCTAssertEqual(nav.objects[1].commands, [.setButtonPage(button: 0, page: 0), .playPlaylist(1000), .goto(1)])
+        XCTAssertEqual(nav.objects[2].commands, [.setButtonPage(button: 0, page: 0), .playPlaylist(1001), .goto(1)])
 
         XCTAssertEqual(nav.buttonCommands[0][0], [.move(register: 0, value: 0), .jumpTitle(1)])
         XCTAssertEqual(nav.buttonCommands[0][1], [.jumpObject(2)])
@@ -440,7 +446,7 @@ final class MenuNavigationTests: XCTestCase {
         menu.loopSeconds = 0
         let noSubtitles = PlaylistSummary(markCount: 1, subtitleStreams: 0, audioStreams: 1)
         let nav = try HDMVMenuAuthor.navigation(for: menu, film: noSubtitles)
-        XCTAssertEqual(nav.objects[1].commands, [.playPlaylist(1000)])
+        XCTAssertEqual(nav.objects[1].commands, [.setButtonPage(button: 0, page: 0), .playPlaylist(1000)])
         XCTAssertEqual(nav.objects[0].commands.count, 6, "no subtitle commands")
     }
 
@@ -466,6 +472,52 @@ final class MenuNavigationTests: XCTestCase {
         XCTAssertEqual(menu.pages[1].buttons.last?.action, .goToPage(2))
         XCTAssertEqual(menu.pages[3].buttons.last?.action, .goToPage(0))
         XCTAssertEqual(menu.pages[3].buttons[0].action, .playChapter(16))
+    }
+}
+
+final class UDFImageTests: XCTestCase {
+    func testDString() {
+        XCTAssertEqual(UDFImageWriter.dstring("BD", fieldLength: 6), [8, 0x42, 0x44, 0, 0, 3])
+        XCTAssertEqual(UDFImageWriter.dstring("é", fieldLength: 4), [8, 0xE9, 0, 2])
+        XCTAssertEqual(UDFImageWriter.dstring("映", fieldLength: 5), [16, 0x66, 0x20, 0, 3])
+    }
+
+    func testImageLayout() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("udf-\(UUID())")
+        defer { try? fm.removeItem(at: dir) }
+        try fm.createDirectory(at: dir.appendingPathComponent("BDMV/STREAM"), withIntermediateDirectories: true)
+        let payload = Data((0..<5000).map { UInt8($0 % 251) })
+        try payload.write(to: dir.appendingPathComponent("BDMV/STREAM/00000.m2ts"))
+        try Data("INDX0200".utf8).write(to: dir.appendingPathComponent("BDMV/index.bdmv"))
+        let iso = dir.appendingPathComponent("out.iso")
+        try UDFImageWriter.writeImage(of: dir.appendingPathComponent(""), to: iso, label: "TEST",
+                                      header: .reproducible)
+        let b = [UInt8](try Data(contentsOf: iso))
+        func le16(_ at: Int) -> Int { Int(b[at]) | Int(b[at + 1]) << 8 }
+        func le32(_ at: Int) -> Int { le16(at) | le16(at + 2) << 16 }
+        func tagIsValid(_ at: Int) -> Bool {
+            var sum: UInt8 = 0
+            for i in 0..<16 where i != 4 { sum &+= b[at + i] }
+            return sum == b[at + 4]
+        }
+        XCTAssertEqual(b.count % 2048, 0)
+        XCTAssertEqual(Array(b[(17 * 2048 + 1)..<(17 * 2048 + 6)]), Array("NSR03".utf8))
+        // Anchors at sector 256 and in the last sector, pointing at the
+        // main volume descriptor sequence at sector 32.
+        for anchor in [256 * 2048, b.count - 2048] {
+            XCTAssertEqual(le16(anchor), 2)
+            XCTAssertTrue(tagIsValid(anchor))
+            XCTAssertEqual(le32(anchor + 20), 32)
+        }
+        XCTAssertEqual(le16(32 * 2048), 1, "primary volume descriptor")
+        XCTAssertEqual(Array(b[(32 * 2048 + 24)..<(32 * 2048 + 29)]), [8] + Array("TEST".utf8))
+        XCTAssertEqual(le16(320 * 2048), 256, "file set descriptor opens the metadata partition")
+        XCTAssertEqual(le16(64 * 2048 + 0x88), 0x0250, "minimum UDF read revision 2.50")
+        // The stream's bytes are in the image, sector-aligned.
+        let needle = Array(payload.prefix(64))
+        let found = stride(from: 0, to: b.count - 64, by: 2048).contains { Array(b[$0..<($0 + 64)]) == needle }
+        XCTAssertTrue(found)
     }
 }
 

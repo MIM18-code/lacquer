@@ -130,8 +130,7 @@ struct EncodePlan: Equatable, Sendable {
         if req.menu != nil {
             switch settings.outputMode {
             case .bdmvFolder: break
-            case .iso:
-                warnings.append(PlanWarning(level: .blocking, text: "Disc menus need BDMV Folder output for now. Make a folder and burn it with Toast or hdiutil."))
+            case .iso: break
             case .m2tsOnly:
                 warnings.append(PlanWarning(level: .info, text: "M2TS output has no menus. Author them in Toast, or choose BDMV Folder."))
             }
@@ -437,6 +436,26 @@ struct EncodePipeline {
                     try await HDMVMenuAuthor(ffmpeg: tools.ffmpeg)
                         .author(menu, disc: target, workDir: workDir, logger: log, onLog: onLog)
                 }
+            case .iso where req.menu != nil:
+                // tsMuxeR only images what it muxed itself, so author the
+                // folder here, add the menus, then write the UDF 2.50 image.
+                let folder = workDir.appendingPathComponent("disc")
+                try await author.authorBDMV(
+                    videoH264: videoOut, audioAC3: audioOut,
+                    frameRate: req.standard.frameRateValue,
+                    videoWidth: req.standard.width, videoHeight: req.standard.height,
+                    outputFolder: folder, chapters: plan.chapterTimes,
+                    subtitle: subtitleTrack, languageCode: lang, logger: log)
+                // The streams are now in the folder; free their space for the image.
+                try? fm.removeItem(at: videoOut)
+                try? fm.removeItem(at: audioOut)
+                log.section("DISC MENU")
+                try await HDMVMenuAuthor(ffmpeg: tools.ffmpeg)
+                    .author(req.menu!, disc: folder, workDir: workDir, logger: log, onLog: onLog)
+                log.section("UDF 2.50 IMAGE")
+                let label = BDMVAuthor.discLabel(for: req.input.deletingPathExtension().lastPathComponent)
+                try await Self.writeImage(of: folder, to: target, label: label)
+                log.write("Wrote \(target.lastPathComponent), label \(label)")
             case .iso:
                 try await author.authorISO(
                     videoH264: videoOut, audioAC3: audioOut,
@@ -459,6 +478,20 @@ struct EncodePipeline {
     }
 
     // MARK: - Helpers
+
+    /// Runs the (blocking) image writer off the cooperative pool, stopping
+    /// it if the job is cancelled.
+    static func writeImage(of folder: URL, to iso: URL, label: String) async throws {
+        let stop = CancelFlag()
+        try await withTaskCancellationHandler {
+            try await Task.detached(priority: .utility) {
+                try UDFImageWriter.writeImage(of: folder, to: iso, label: label, isCancelled: { stop.isSet })
+            }.value
+        } onCancel: {
+            stop.set()
+        }
+        try Task.checkCancellation()
+    }
 
     /// Language tag for the disc's video and audio streams: the source audio
     /// track's tag when it's a real ISO 639-2 code, English otherwise.
@@ -539,4 +572,12 @@ enum AppInfo {
     static var version: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "dev"
     }
+}
+
+/// A flag set from a cancellation handler and polled by blocking work.
+final class CancelFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func set() { lock.lock(); value = true; lock.unlock() }
 }
