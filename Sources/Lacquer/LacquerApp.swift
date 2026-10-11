@@ -10,6 +10,12 @@ enum Entry {
             let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
             exit(MainActor.assumeIsolated { Snapshot.run(directory: dir) })
         }
+        #if DEBUG
+        if MenuDebug.isMenuCommand(CommandLine.arguments) {
+            MenuDebug.run(CommandLine.arguments)
+            return
+        }
+        #endif
         if CommandLine.arguments.contains("--headless") {
             let task = Task {
                 let code = await HeadlessCLI.run(Array(CommandLine.arguments.dropFirst()))
