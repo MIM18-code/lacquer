@@ -38,7 +38,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 GroupBox("Disc") {
-                    Picker("", selection: $coordinator.settings.discSize) {
+                    Picker("Disc size", selection: $coordinator.settings.discSize) {
                         ForEach(DiscSize.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden()
@@ -47,9 +47,8 @@ struct ContentView: View {
 
                 GroupBox("Video") {
                     VStack(alignment: .leading, spacing: 6) {
-                        Picker("", selection: $coordinator.settings.videoStandard) {
+                        Picker("Video format", selection: $coordinator.settings.videoStandard) {
                             Text("Match each source").tag(VideoStandard?.none)
-                            Divider()
                             ForEach(VideoStandard.allCases) { Text($0.rawValue).tag(VideoStandard?.some($0)) }
                         }
                         .labelsHidden()
@@ -65,7 +64,7 @@ struct ContentView: View {
 
                 GroupBox("Audio") {
                     VStack(alignment: .leading, spacing: 6) {
-                        Picker("", selection: $coordinator.settings.audioBitrateKbps) {
+                        Picker("Audio bitrate", selection: $coordinator.settings.audioBitrateKbps) {
                             Text("448 kbps").tag(448)
                             Text("640 kbps").tag(640)
                         }
@@ -81,7 +80,7 @@ struct ContentView: View {
 
                 GroupBox("Chapters") {
                     VStack(alignment: .leading, spacing: 6) {
-                        Picker("", selection: $coordinator.settings.chapters.mode) {
+                        Picker("Chapters", selection: $coordinator.settings.chapters.mode) {
                             ForEach(ChaptersMode.allCases) { Text($0.rawValue).tag($0) }
                         }
                         .labelsHidden()
@@ -105,7 +104,7 @@ struct ContentView: View {
 
                 GroupBox("Output") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Picker("", selection: $coordinator.settings.outputMode) {
+                        Picker("Output", selection: $coordinator.settings.outputMode) {
                             ForEach(OutputMode.allCases) { Text($0.rawValue).tag($0) }
                         }
                         .labelsHidden()
@@ -133,6 +132,7 @@ struct ContentView: View {
                                 } label: {
                                     Image(systemName: "arrow.uturn.backward")
                                 }
+                                .accessibilityLabel("Save next to each source file")
                                 .controlSize(.small)
                                 .help("Save next to each source file")
                             }
@@ -510,6 +510,7 @@ struct JobRow: View {
         }
         .buttonStyle(.borderless)
         .help(help)
+        .accessibilityLabel(help)
     }
 
     private var progressLine: some View {
@@ -628,12 +629,11 @@ struct JobRow: View {
             Text("Format:")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Picker("", selection: Binding(
+            Picker("Format for \(job.inputURL.lastPathComponent)", selection: Binding(
                 get: { job.standardOverride },
                 set: { onSelectStandard($0) }
             )) {
                 Text(followLabel).tag(VideoStandard?.none)
-                Divider()
                 ForEach(VideoStandard.allCases) { Text($0.rawValue).tag(VideoStandard?.some($0)) }
             }
             .labelsHidden()
@@ -651,7 +651,7 @@ struct JobRow: View {
                 Text(only.label)
                     .font(.caption)
             } else {
-                Picker("", selection: Binding(
+                Picker("Audio for \(job.inputURL.lastPathComponent)", selection: Binding(
                     get: { job.audioSource },
                     set: { onSelectAudio($0) }
                 )) {
@@ -672,7 +672,7 @@ struct JobRow: View {
                     .font(.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Picker("", selection: Binding(
+                Picker("Subtitle language", selection: Binding(
                     get: { job.subtitleLanguageCode.isEmpty ? "eng" : job.subtitleLanguageCode },
                     set: { onSelectSubtitleLanguage($0) }
                 )) {
@@ -709,8 +709,13 @@ struct JobRow: View {
         }
     }
 
-    @ViewBuilder
     private var statusIcon: some View {
+        statusSymbol
+            .accessibilityLabel(job.status.rawValue)
+    }
+
+    @ViewBuilder
+    private var statusSymbol: some View {
         switch job.status {
         case .pending:
             if plan.isBlocked {
