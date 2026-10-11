@@ -442,6 +442,8 @@ struct EncodePipeline {
                     .render(template: template, film: req.input, chapters: plan.chapterTimes,
                             hasSubtitles: req.subtitle != nil)
                 log.write("Rendered \(req.menu?.pages.count ?? 0) menu pages (\(template.style.displayName))")
+                // Refuse a layout the disc image can't hold now, not after the encode.
+                try UDFImageWriter.checkLayout(menuPages: req.menu?.pages.count ?? 0)
             } catch {
                 throw fail("Menu render", error)
             }
