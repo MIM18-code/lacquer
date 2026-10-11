@@ -143,6 +143,9 @@ echo "ok: ffmpeg, ffprobe, tsMuxeR link only /usr/lib and /System"
 
 cp "$REPO/LICENSE" "$REPO/THIRD_PARTY_NOTICES.md" "$RES/"
 cp -R "$RUNTIME/legal/." "$RES/legal/"
+# License texts with no pinned source archive to come from (FreeType's FTL,
+# taken from the FreeType repository at VER-2-13-3, docs/FTL.TXT).
+cp -R "$REPO/packaging/legal-static/." "$RES/legal/"
 cat > "$RES/legal/SOURCE_OFFER.txt" <<OFFER
 Written offer for source code
 
