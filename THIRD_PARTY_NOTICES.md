@@ -109,4 +109,5 @@ permissive license compatible with the GPL.
 
 FreeType is under the FreeType License (FTL). Portions of this software are
 copyright (c) The FreeType Project (https://freetype.org). All rights reserved.
-The upstream binary does not report its FreeType version.
+The upstream binary does not report its FreeType version. The FTL text is in
+`legal/freetype/FTL.TXT`.
