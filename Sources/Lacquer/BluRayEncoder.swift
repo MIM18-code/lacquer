@@ -113,6 +113,14 @@ struct BluRayEncoder {
             filters.append("zscale=t=bt709:m=bt709:r=tv")
         }
 
+        if abs(source.sampleAspect - 1) > 0.01 {
+            // Anamorphic source: stretch to square pixels first, or the fit
+            // below works from the stored width and squeezes the picture.
+            // Horizontal only, so interlaced fields stay apart.
+            filters.append("scale=trunc(iw*sar/2)*2:ih:flags=lanczos")
+            filters.append("setsar=1")
+        }
+
         // `force_original_aspect_ratio=decrease` fits the source inside the
         // frame without stretching; `pad` adds the black bars. Letterboxes
         // scope/1.85/DCI, pillarboxes 4:3, no-op for 16:9.
@@ -197,7 +205,7 @@ struct BluRayEncoder {
             var args: [String] = [
                 "-hide_banner", "-y",
                 "-i", input.path,
-                "-map", "0:v:0",
+                "-map", "0:\(source.videoStreamIndex)",
                 "-an", "-sn", "-dn",
                 "-vf", vf,
                 "-r", standard.frameRate,
@@ -261,6 +269,19 @@ struct BluRayEncoder {
     /// chosen audio source into AC-3. Single streams with more than six
     /// channels are downmixed to 5.1 by ffmpeg's standard matrix; discrete
     /// mono tracks are joined into one program in the given channel order.
+    /// Filter that lines the audio up with the video. The raw AC-3 and
+    /// H.264 streams both start at zero, so a track that begins later (or
+    /// earlier) than the picture in the source has to be padded (or trimmed)
+    /// here, or it plays out of sync on the disc.
+    static func syncFilter(audioStart: Double, videoStart: Double) -> String? {
+        let offset = audioStart - videoStart
+        guard offset.isFinite, abs(offset) >= 0.001 else { return nil }
+        if offset > 0 {
+            return "adelay=delays=\(Int((offset * 1000).rounded())):all=1"
+        }
+        return String(format: "atrim=start=%.6f,asetpts=PTS-STARTPTS", -offset)
+    }
+
     static func audioArguments(
         source: AudioSource,
         input: URL,
@@ -269,12 +290,18 @@ struct BluRayEncoder {
     ) -> [String] {
         switch source {
         case .stream(let index):
-            let sourceChannels = info.audioStream(index: index)?.channels ?? 2
+            let stream = info.audioStream(index: index)
+            let sourceChannels = stream?.channels ?? 2
             let channels = min(max(sourceChannels, 1), 6)
-            return [
+            var args = [
                 "-i", input.path,
                 "-map", "0:\(index)",
-                "-vn", "-sn", "-dn",
+                "-vn", "-sn", "-dn"
+            ]
+            if let sync = syncFilter(audioStart: stream?.startTime ?? 0, videoStart: info.videoStartTime) {
+                args += ["-af", sync]
+            }
+            return args + [
                 "-c:a", "ac3",
                 "-b:a", "\(min(bitrateKbps, maxAC3Bitrate(channels: channels)))k",
                 "-ac", "\(channels)",
@@ -298,7 +325,12 @@ struct BluRayEncoder {
             let map = zip(used.indices, channelNames)
                 .map { "\($0).0-\($1)" }
                 .joined(separator: "|")
-            let graph = "\(inputs)join=inputs=\(used.count):channel_layout=\(layout):map=\(map)[aout]"
+            var graph = "\(inputs)join=inputs=\(used.count):channel_layout=\(layout):map=\(map)"
+            if let sync = syncFilter(audioStart: info.audioStream(index: used[0])?.startTime ?? 0,
+                                     videoStart: info.videoStartTime) {
+                graph += ",\(sync)"
+            }
+            graph += "[aout]"
             return [
                 "-i", input.path,
                 "-filter_complex", graph,

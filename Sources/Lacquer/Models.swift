@@ -351,6 +351,8 @@ struct AudioStreamInfo: Equatable, Sendable, Identifiable {
     /// Track title metadata, if any. Helps disambiguate "5.1 program" from
     /// "Lt/Rt fold-down" when a file carries multiple tracks.
     var title: String?
+    /// Seconds; compared with the video's start to keep a delayed track in sync.
+    var startTime: Double = 0
 
     var id: Int { ffmpegIndex }
 
@@ -433,6 +435,11 @@ struct MediaInfo: Equatable, Sendable {
     var colorPrimaries: String = ""
     var colorSpace: String = ""
     var pixelFormat: String = ""
+    /// ffmpeg index of the film's video stream (cover art is skipped).
+    var videoStreamIndex: Int = 0
+    /// Pixel aspect ratio; 1 for square pixels. Anamorphic DV is 32:27 or 8:9.
+    var sampleAspect: Double = 1
+    var videoStartTime: Double = 0
 
     /// PQ (HDR10, Dolby Vision base layer) or HLG.
     var isHDR: Bool {

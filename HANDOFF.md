@@ -6,7 +6,7 @@ State of the project after the session that took it from a one-off build for a f
 
 ## Where it stands
 
-- Builds clean with `swift build -Xswiftc -warnings-as-errors`. 27 unit tests and the end-to-end gate (`Scripts/e2e_test.sh`) pass.
+- Builds clean with `swift build -Xswiftc -warnings-as-errors`. 31 unit tests and the end-to-end gate (`Scripts/e2e_test.sh`) pass.
 - `packaging/make_dmg.sh` produces a Developer ID signed, notarized and stapled DMG (Apple accepted it with the `backlot-notary` profile).
 - Not yet published. Blocked on: the new name, a hardware disc test, and a public repo.
 
@@ -33,6 +33,12 @@ State of the project after the session that took it from a one-off build for a f
 - Open With and drops on the Dock icon.
 - An About panel with license credits and an ISO volume label.
 - A silent track for sources without audio, and the Mac kept awake during the queue.
+
+## Review findings
+
+A Codex review on the work account confirmed four more defects before its credits ran out: anamorphic squeeze, lost audio start offsets, cover art taken as video, and short clips failing the size check. All four are fixed, with unit and e2e regressions. Details are in `reviews/codex-review-2026-10-11.md`. That review never reached the packaging scripts.
+
+ffmpeg prints "corrupt input packet" on every tsMuxeR M2TS. This is a false alarm: decoded frames are bit-identical to the source H.264. Don't chase it.
 
 ## Layout
 

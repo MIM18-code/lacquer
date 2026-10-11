@@ -240,3 +240,71 @@ final class NamingAndTextTests: XCTestCase {
         XCTAssertEqual(EncodeSettings.load(from: defaults), s)
     }
 }
+
+/// Defects found in the 2026-10-11 Codex review.
+final class ReviewRegressionTests: XCTestCase {
+    func testAnamorphicSourceIsUnsqueezedBeforeFitting() {
+        let dv = MediaInfo(duration: 60, width: 720, height: 480, videoCodec: "dvvideo", frameRate: 30000.0 / 1001,
+                           audioStreams: [], sourceIsInterlaced: false, sampleAspect: 32.0 / 27)
+        let vf = BluRayEncoder.videoFilterChain(standard: .p1080_2398, source: dv, capabilities: .none)
+        let unsqueeze = vf.range(of: "scale=trunc(iw*sar/2)*2:ih")
+        XCTAssertNotNil(unsqueeze, vf)
+        XCTAssertLessThan(unsqueeze!.lowerBound, vf.range(of: "force_original_aspect_ratio")!.lowerBound)
+        let square = MediaInfo(duration: 60, width: 1920, height: 1080, videoCodec: "prores", frameRate: 24,
+                               audioStreams: [], sourceIsInterlaced: false)
+        XCTAssertFalse(BluRayEncoder.videoFilterChain(standard: .p1080_24, source: square, capabilities: .none)
+            .contains("iw*sar"))
+    }
+
+    func testLateAudioIsPaddedAndEarlyAudioTrimmed() {
+        XCTAssertEqual(BluRayEncoder.syncFilter(audioStart: 1.0, videoStart: 0), "adelay=delays=1000:all=1")
+        XCTAssertEqual(BluRayEncoder.syncFilter(audioStart: 0, videoStart: 0.5), "atrim=start=0.500000,asetpts=PTS-STARTPTS")
+        XCTAssertNil(BluRayEncoder.syncFilter(audioStart: 0.0004, videoStart: 0))
+
+        var late = AudioStreamInfo(ffmpegIndex: 1, codec: "pcm", channels: 2, layout: "stereo")
+        late.startTime = 0.25
+        let info = MediaInfo(duration: 60, width: 1920, height: 1080, videoCodec: "prores", frameRate: 24,
+                             audioStreams: [late], sourceIsInterlaced: false)
+        let args = BluRayEncoder.audioArguments(source: .stream(1), input: URL(fileURLWithPath: "/x.mov"),
+                                                info: info, bitrateKbps: 448)
+        XCTAssertEqual(args[args.firstIndex(of: "-af")! + 1], "adelay=delays=250:all=1")
+    }
+
+    func testDiscreteJoinCarriesSyncFilter() {
+        var streams = (1...6).map { AudioStreamInfo(ffmpegIndex: $0, codec: "pcm", channels: 1, layout: "mono") }
+        for i in streams.indices { streams[i].startTime = 0.1 }
+        let info = MediaInfo(duration: 60, width: 1920, height: 1080, videoCodec: "prores", frameRate: 24,
+                             audioStreams: streams, sourceIsInterlaced: false)
+        let args = BluRayEncoder.audioArguments(source: .discrete([1, 2, 3, 4, 5, 6], .smpte),
+                                                input: URL(fileURLWithPath: "/x.mov"), info: info, bitrateKbps: 640)
+        XCTAssertTrue(args.contains { $0.hasSuffix("5.0-BR,adelay=delays=100:all=1[aout]") }, "\(args)")
+    }
+
+    func testCoverArtIsNotTheFilm() throws {
+        let json: [String: Any] = [
+            "format": ["duration": "12.0"],
+            "streams": [
+                ["index": 0, "codec_type": "video", "codec_name": "png", "width": 64, "height": 64,
+                 "avg_frame_rate": "0/0", "disposition": ["attached_pic": 1]],
+                ["index": 1, "codec_type": "video", "codec_name": "h264", "width": 1920, "height": 1080,
+                 "avg_frame_rate": "24/1", "sample_aspect_ratio": "1:1", "start_time": "0.000000",
+                 "disposition": ["attached_pic": 0]],
+                ["index": 2, "codec_type": "audio", "codec_name": "aac", "channels": 2, "start_time": "0.042000",
+                 "tags": ["handler_name": "SoundHandler"]]
+            ]
+        ]
+        let info = try MediaProbe(ffprobe: URL(fileURLWithPath: "/ffprobe")).parse(json)
+        XCTAssertEqual(info.videoStreamIndex, 1)
+        XCTAssertEqual(info.width, 1920)
+        XCTAssertEqual(info.sampleAspect, 1)
+        XCTAssertEqual(info.audioStreams.first?.startTime, 0.042)
+        XCTAssertNil(info.audioStreams.first?.title, "generic handler names aren't titles")
+
+        let onlyArt: [String: Any] = [
+            "format": ["duration": "200.0"],
+            "streams": [["index": 0, "codec_type": "video", "codec_name": "mjpeg", "disposition": ["attached_pic": 1]],
+                        ["index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2]]
+        ]
+        XCTAssertThrowsError(try MediaProbe(ffprobe: URL(fileURLWithPath: "/ffprobe")).parse(onlyArt))
+    }
+}

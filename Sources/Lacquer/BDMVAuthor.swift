@@ -114,7 +114,7 @@ struct BDMVAuthor {
                 return l < r
             }
         if let largest {
-            try Self.assertOutputBytes(at: largest, minimum: 1_048_576)
+            try Self.assertOutputBytes(at: largest, minimum: Self.minimumOutputBytes)
         }
 
         // Some players complain if CERTIFICATE/ is missing.
@@ -167,7 +167,7 @@ struct BDMVAuthor {
             logger: logger,
             subprocessName: "tsMuxeR (M2TS only)"
         )
-        try Self.assertOutputBytes(at: outputFile, minimum: 1024)
+        try Self.assertOutputBytes(at: outputFile, minimum: Self.minimumOutputBytes)
     }
 
     /// Produce a UDF 2.50 Blu-ray ISO directly. tsMuxeR detects the `.iso`
@@ -216,10 +216,15 @@ struct BDMVAuthor {
             logger: logger,
             subprocessName: "tsMuxeR (UDF 2.50 ISO)"
         )
-        // 1 MiB is well below any realistic Blu-ray ISO and well above the
-        // overhead of a tsMuxeR-emitted truncated/empty file.
+        // An empty UDF image alone is several hundred KB, so the ISO needs a
+        // higher floor than a bare stream file.
         try Self.assertOutputBytes(at: outputISO, minimum: 1_048_576)
     }
+
+    /// A stream file smaller than this means tsMuxeR wrote headers and no
+    /// frames. Kept low because a few seconds of simple picture (a logo, a
+    /// test clip) legitimately encodes to a few hundred KB.
+    static let minimumOutputBytes: Int64 = 32_768
 
     private static func assertOutputBytes(at url: URL, minimum: Int64) throws {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)

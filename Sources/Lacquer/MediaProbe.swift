@@ -32,7 +32,11 @@ struct MediaProbe {
         var audioStreams: [AudioStreamInfo] = []
         for s in streams {
             let type = s["codec_type"] as? String ?? ""
-            if type == "video", video == nil {
+            // Cover art and thumbnails show up as one-frame "video" streams
+            // flagged attached_pic; they are never the film.
+            let disposition = s["disposition"] as? [String: Any] ?? [:]
+            let isCoverArt = (disposition["attached_pic"] as? Int) == 1
+            if type == "video", video == nil, !isCoverArt {
                 video = s
             } else if type == "audio" {
                 audioStreams.append(parseAudio(s))
@@ -89,7 +93,10 @@ struct MediaProbe {
             colorTransfer: (v["color_transfer"] as? String) ?? "",
             colorPrimaries: (v["color_primaries"] as? String) ?? "",
             colorSpace: (v["color_space"] as? String) ?? "",
-            pixelFormat: (v["pix_fmt"] as? String) ?? ""
+            pixelFormat: (v["pix_fmt"] as? String) ?? "",
+            videoStreamIndex: (v["index"] as? Int) ?? 0,
+            sampleAspect: parseRatio((v["sample_aspect_ratio"] as? String) ?? ""),
+            videoStartTime: Double((v["start_time"] as? String) ?? "0") ?? 0
         )
     }
 
@@ -119,8 +126,16 @@ struct MediaProbe {
             layout: layout,
             sampleRate: sampleRate,
             language: language,
-            title: title
+            title: title,
+            startTime: Double((s["start_time"] as? String) ?? "0") ?? 0
         )
+    }
+
+    /// Pixel aspect ratio such as "32:27". Missing, "0:1" or "N/A" mean square.
+    private func parseRatio(_ str: String) -> Double {
+        let parts = str.split(separator: ":").compactMap { Double($0) }
+        guard parts.count == 2, parts[0] > 0, parts[1] > 0 else { return 1 }
+        return parts[0] / parts[1]
     }
 
     private func parseRational(_ str: String) -> Double {
