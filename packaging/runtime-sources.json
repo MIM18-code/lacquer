@@ -7,6 +7,20 @@
     "license": "GPL-3.0-or-later (built with --enable-gpl --enable-version3)",
     "note": "Release tarball from ffmpeg.org (9.0 point release current on 2026-10-11)."
   },
+  "ffmpeg_sig": {
+    "file": "ffmpeg-9.0.2.tar.xz.asc",
+    "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc",
+    "sha256": "d617fd94ea354dadd2a8bb16243d37c44e1e9729b06b6ad58fe30bfb0fa943f2",
+    "verifies": "ffmpeg",
+    "signer_fingerprint": "FCF986EA15E6E293A5644F10B4322F04D67658D8",
+    "note": "Detached signature for the FFmpeg tarball. Checked with gpg against the pinned key when gpg is installed."
+  },
+  "ffmpeg_key": {
+    "file": "ffmpeg-devel.asc",
+    "url": "https://ffmpeg.org/ffmpeg-devel.asc",
+    "sha256": "397b3becedcd5a98769967ff1ff8501ddc89f8368b8f766e4701377d7dbaabe5",
+    "note": "FFmpeg release signing key (fingerprint FCF9 86EA 15E6 E293 A564 4F10 B432 2F04 D676 58D8), pinned by hash and fingerprint."
+  },
   "x264": {
     "file": "x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz",
     "url": "https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.gz",
@@ -38,5 +52,13 @@
     "version": "2.7.0",
     "license": "Apache-2.0",
     "note": "Source for the tsMuxeR binary above (tag 2.7.0, commit f06ac394c55ccee1cb76ae54f4636532a2d10253). Shipped in the source archive and used for the license text."
+  },
+  "libpng_source": {
+    "file": "libpng-1.6.47.tar.gz",
+    "url": "https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.47.tar.gz",
+    "sha256": "631a4c58ea6c10c81f160c4b21fa8495b715d251698ebc2552077e8450f30454",
+    "version": "1.6.47",
+    "license": "libpng-2.0",
+    "note": "libpng 1.6.47 is statically linked into the upstream tsMuxeR binary (its strings report this version). Used for the license text."
   }
 }
