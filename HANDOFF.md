@@ -55,7 +55,7 @@ ffmpeg prints "corrupt input packet" on every tsMuxeR M2TS. This is a false alar
 | `HeadlessCLI.swift` | `--headless` mode |
 | `Snapshot.swift` | `--snapshot DIR`: renders the window with sample jobs, light and dark, to PNG. Use it to check layout without screen access, and for README/site screenshots |
 | `Menus/DiscMenu.swift` | Contract between the menu designer and the HDMV menu author |
-| `Menus/Menu*.swift` | Menu designer: templates, three presets, planner (layout, paging, remote navigation), renderer, palette limiter, designer window. Shown only when `Features.discMenus` is on (debug builds, or the `enableDiscMenus` default) until authoring lands |
+| `Menus/Menu*.swift` | Menu designer: templates, three presets, planner (layout, paging, remote navigation), renderer, palette limiter, designer window. On by default; `Features.discMenus` (the `disableDiscMenus` default) can hide them |
 | `Tests/`, `Scripts/e2e_test.sh` | Unit tests, end-to-end release gate |
 | `packaging/` | Runtime build, signing, DMG, notarization; names in `app.env` |
 

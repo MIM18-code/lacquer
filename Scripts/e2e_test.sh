@@ -138,7 +138,8 @@ echo "== menus: demo menu on a BDMV folder and a UDF 2.50 ISO"
 printf '1\n00:00:01,000 --> 00:00:03,000\nHello\n' > "$FX/menufilm.srt"
 # libbluray harness (Homebrew libbluray); skipped when it can't be built.
 MENU_CHECK="$PWD/Scripts/menu-check/menu_check"
-[ -x "$MENU_CHECK" ] || Scripts/menu-check/build.sh >/dev/null 2>&1 || echo "  (menu_check not built: brew install libbluray to run it)"
+# Rebuild when missing or older than its source, so a stale binary can't test old logic.
+[ -x "$MENU_CHECK" ] && [ "$MENU_CHECK" -nt Scripts/menu-check/menu_check.c ] || Scripts/menu-check/build.sh >/dev/null 2>&1 || echo "  (menu_check not built: brew install libbluray to run it)"
 # menu_check <label> <disc>: drive the disc through libbluray against the menu
 # map the CLI wrote next to it.
 menu_check() {

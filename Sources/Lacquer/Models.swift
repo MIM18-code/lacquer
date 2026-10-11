@@ -530,15 +530,11 @@ struct MediaInfo: Equatable, Sendable {
 // MARK: - Feature flags
 
 enum Features {
-    /// Disc menus: the designer works, but authoring them onto the disc is
-    /// still being built. On in debug builds, or with
-    /// `defaults write com.mindinmotion.lacquer enableDiscMenus -bool YES`.
+    /// Disc menus. Kept as a switch so a problem found on hardware players
+    /// can turn the feature off in one place; `defaults write
+    /// com.mindinmotion.lacquer disableDiscMenus -bool YES` hides it locally.
     static var discMenus: Bool {
-        #if DEBUG
-        return true
-        #else
-        return UserDefaults.standard.bool(forKey: "enableDiscMenus")
-        #endif
+        !UserDefaults.standard.bool(forKey: "disableDiscMenus")
     }
 }
 
