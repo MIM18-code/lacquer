@@ -6,6 +6,10 @@ import AppKit
 @main
 enum Entry {
     static func main() {
+        if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count {
+            let dir = URL(fileURLWithPath: CommandLine.arguments[i + 1])
+            exit(MainActor.assumeIsolated { Snapshot.run(directory: dir) })
+        }
         if CommandLine.arguments.contains("--headless") {
             let task = Task {
                 let code = await HeadlessCLI.run(Array(CommandLine.arguments.dropFirst()))

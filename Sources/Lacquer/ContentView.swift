@@ -2,19 +2,52 @@ import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
+/// Colors that belong to Lacquer itself. Controls keep the system accent;
+/// lacquer red only appears on the disc graphic.
+enum LacquerStyle {
+    static let lacquer = Color(red: 0.72, green: 0.13, blue: 0.15)
+    static let lacquerBright = Color(red: 0.89, green: 0.25, blue: 0.25)
+    static let discBlack = Color(red: 0.094, green: 0.094, blue: 0.106)
+    static let discSheen = Color(red: 0.42, green: 0.44, blue: 0.95)
+}
+
 struct ContentView: View {
     @EnvironmentObject private var coordinator: EncodeCoordinator
     @State private var isDropTargeted = false
-    @State private var showLog = false
+    @State private var showActivity = false
 
     var body: some View {
-        HSplitView {
-            sidebar
-                .frame(minWidth: 290, idealWidth: 310, maxWidth: 360)
-            mainPanel
-                .padding(16)
-                .frame(minWidth: 520)
+        NavigationSplitView {
+            SettingsSidebar()
+                .navigationSplitViewColumnWidth(min: 290, ideal: 310, max: 380)
+        } detail: {
+            VStack(spacing: 0) {
+                queueArea
+                if showActivity {
+                    Divider()
+                    activityPanel
+                }
+                if !coordinator.jobs.isEmpty {
+                    Divider()
+                    footer
+                }
+            }
+            .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+                handleDrop(providers: providers)
+                return true
+            }
+            .overlay {
+                if isDropTargeted {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color.accentColor, lineWidth: 3)
+                        .padding(6)
+                        .allowsHitTesting(false)
+                }
+            }
         }
+        .navigationTitle(AppInfo.name)
+        .navigationSubtitle(subtitle)
+        .toolbar { toolbar }
         .onAppear { coordinator.loadTools() }
         .alert("Something went wrong", isPresented: .init(
             get: { coordinator.errorMessage != nil },
@@ -26,208 +59,157 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Sidebar
+    private var subtitle: String {
+        let pending = coordinator.jobs.filter { $0.status == .pending }.count
+        if coordinator.isRunning, let job = coordinator.jobs.first(where: { $0.status == .running }) {
+            return "Encoding \(job.inputURL.lastPathComponent)"
+        }
+        switch pending {
+        case 0: return coordinator.jobs.isEmpty ? "Blu-ray discs from a finished master" : "Nothing waiting"
+        case 1: return "1 disc waiting"
+        default: return "\(pending) discs waiting"
+        }
+    }
 
-    private var sidebar: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Settings")
-                    .font(.title3.bold())
-                Text("Jobs that haven't started use these settings.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+    // MARK: - Toolbar
 
-                GroupBox("Disc") {
-                    Picker("Disc size", selection: $coordinator.settings.discSize) {
-                        ForEach(DiscSize.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .labelsHidden()
-                    .padding(.vertical, 2)
-                }
-
-                GroupBox("Video") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Picker("Video format", selection: $coordinator.settings.videoStandard) {
-                            Text("Match each source").tag(VideoStandard?.none)
-                            ForEach(VideoStandard.allCases) { Text($0.rawValue).tag(VideoStandard?.some($0)) }
-                        }
-                        .labelsHidden()
-                        Text(videoHint)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Toggle("Two-pass (slower, better quality)",
-                               isOn: $coordinator.settings.twoPass)
-                    }
-                    .padding(.vertical, 2)
-                }
-
-                GroupBox("Audio") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Picker("Audio bitrate", selection: $coordinator.settings.audioBitrateKbps) {
-                            Text("448 kbps").tag(448)
-                            Text("640 kbps").tag(640)
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        Text("AC-3, up to 5.1. Stereo and mono tracks are capped at 448 kbps. 7.1 sources are downmixed to 5.1.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.vertical, 2)
-                }
-
-                GroupBox("Chapters") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Picker("Chapters", selection: $coordinator.settings.chapters.mode) {
-                            ForEach(ChaptersMode.allCases) { Text($0.rawValue).tag($0) }
-                        }
-                        .labelsHidden()
-
-                        if coordinator.settings.chapters.mode == .custom {
-                            TextField("00:00, 05:30, 12:00, …",
-                                      text: $coordinator.settings.chapters.customText,
-                                      axis: .vertical)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(.caption, design: .monospaced))
-                                .lineLimit(2...4)
-                        }
-
-                        Text(chaptersHint)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.vertical, 2)
-                }
-
-                GroupBox("Output") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Picker("Output", selection: $coordinator.settings.outputMode) {
-                            ForEach(OutputMode.allCases) { Text($0.rawValue).tag($0) }
-                        }
-                        .labelsHidden()
-                        Text(outputHint)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Divider()
-                        Text("Save to")
-                            .font(.caption.bold())
-                        HStack(spacing: 6) {
-                            Image(systemName: "folder")
-                                .foregroundStyle(.secondary)
-                            Text(coordinator.settings.outputFolder?.lastPathComponent ?? "Next to each source file")
-                                .font(.caption)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .help(coordinator.settings.outputFolderPath ?? "Output goes in the same folder as the source.")
-                            Spacer(minLength: 4)
-                            Button("Choose…") { chooseOutputFolder() }
-                                .controlSize(.small)
-                            if coordinator.settings.outputFolderPath != nil {
-                                Button {
-                                    coordinator.settings.outputFolderPath = nil
-                                } label: {
-                                    Image(systemName: "arrow.uturn.backward")
-                                }
-                                .accessibilityLabel("Save next to each source file")
-                                .controlSize(.small)
-                                .help("Save next to each source file")
-                            }
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-
-                if coordinator.tools == nil {
-                    Label("Encoding tools not found", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .font(.caption)
-                }
-                Spacer(minLength: 0)
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                pickFiles()
+            } label: {
+                Label("Add Files", systemImage: "plus")
             }
-            .padding(16)
+            .help("Add masters to the queue")
+
+            Toggle(isOn: $showActivity) {
+                Label("Activity", systemImage: "list.bullet.rectangle")
+            }
+            .help("Show what each encode is doing")
+
+            if coordinator.isRunning {
+                Button(role: .destructive) {
+                    coordinator.stop()
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .disabled(coordinator.stopRequested)
+                .help("Stop the current disc and delete its partial output. The rest of the queue stays.")
+            } else {
+                Button {
+                    coordinator.start()
+                } label: {
+                    Label("Start", systemImage: "play.fill")
+                }
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!coordinator.hasPendingJobs || coordinator.tools == nil)
+                .help("Encode every waiting disc (⌘↩)")
+            }
         }
     }
 
-    private var videoHint: String {
-        if coordinator.settings.videoStandard == nil {
-            return "Picks the Blu-ray format that keeps every frame: 23.976 and 24 fps stay 1080p, 25 and 29.97 fps go out as 1080i carrying progressive frames."
-        }
-        return "Every job uses this format unless you change it on the job."
-    }
+    // MARK: - Queue
 
-    private var chaptersHint: String {
-        switch coordinator.settings.chapters.mode {
-        case .none:
-            return "Disc auto-plays on insert. No skip points on the remote."
-        case .auto5, .auto10:
-            return "Chapter stops let you skip forward/back with Next/Prev. No on-screen menu."
-        case .custom:
-            return "Comma, newline, or semicolon separated. Use HH:MM:SS, MM:SS, or seconds."
-        }
-    }
-
-    private var outputHint: String {
-        switch coordinator.settings.outputMode {
-        case .bdmvFolder:
-            return "A BDMV folder. Burn it with Toast or any Blu-ray authoring tool."
-        case .iso:
-            return "A UDF 2.50 disc image. Burn it with Toast or `hdiutil burn`, or upload it to a duplicator."
-        case .m2tsOnly:
-            return "One M2TS file. Use this when Toast will author the menus."
-        }
-    }
-
-    // MARK: - Main panel
-
-    private var mainPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            dropZone
-            queue
-            logSection
-            actionBar
+    @ViewBuilder
+    private var queueArea: some View {
+        if coordinator.jobs.isEmpty {
+            emptyState
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(coordinator.jobs) { job in
+                        JobRow(
+                            job: job,
+                            plan: coordinator.plan(for: job),
+                            settings: coordinator.settings,
+                            onRemove: { coordinator.removeJob(job) },
+                            onRetry: { coordinator.retry(job) },
+                            onReveal: { reveal(job.outputURL) },
+                            onOpenLog: { if let log = job.logURL { NSWorkspace.shared.open(log) } },
+                            onAttachSubtitle: { attachSubtitle(to: job) },
+                            onClearSubtitle: { coordinator.setSubtitle(nil, for: job.id) },
+                            onSelectAudio: { coordinator.setAudioSource($0, for: job.id) },
+                            onSelectStandard: { coordinator.setStandardOverride($0, for: job.id) },
+                            onSelectSubtitleLanguage: { coordinator.setSubtitleLanguage($0, for: job.id) }
+                        )
+                        Divider().padding(.leading, 70)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .textBackgroundColor))
         }
     }
 
-    private var dropZone: some View {
-        let compact = !coordinator.jobs.isEmpty
-        return HStack(spacing: 12) {
-            Image(systemName: "opticaldisc")
-                .font(.system(size: compact ? 20 : 30))
+    private var emptyState: some View {
+        VStack(spacing: 14) {
+            DiscBadge(status: .done, progress: 1, blocked: false, showsBadge: false)
+                .frame(width: 120, height: 120)
+                .accessibilityHidden(true)
+            Text("Drop a finished master here")
+                .font(.title2.weight(.semibold))
+            Text("ProRes, DNxHR, H.264 or HEVC, in MOV, MP4, MXF or MKV. Each file becomes one disc, and you can check its format, audio and fit before anything encodes.")
+                .font(.callout)
                 .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(compact ? "Drop more files or folders" : "Drop a finished film master here")
-                if !compact {
-                    Text("ProRes, DNxHR, H.264 or HEVC in MOV, MP4, MXF or MKV")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 400)
             Button("Choose Files…") { pickFiles() }
+                .controlSize(.large)
+                .padding(.top, 4)
+            if coordinator.tools == nil {
+                Label("The encoding tools weren't found, so files can't be read.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .padding(.top, 8)
+            }
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private var footer: some View {
+        let pending = coordinator.jobs.filter { $0.status == .pending }
+        let bytes = pending.reduce(Int64(0)) { $0 + coordinator.plan(for: $1).estimatedBytes }
+        let size = formatGB(bytes)
+        return HStack {
+            Text(pending.isEmpty
+                 ? "\(coordinator.jobs.count) in the queue"
+                 : "\(pending.count) waiting, about \(size) to write")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            Spacer()
+            Button("Clear Done") { coordinator.clearFinished() }
+                .disabled(!coordinator.jobs.contains { $0.status == .done })
         }
         .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity)
-        .frame(height: compact ? 52 : 96)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(
-                    isDropTargeted ? Color.accentColor : Color.secondary.opacity(0.35),
-                    style: StrokeStyle(lineWidth: 2, dash: [6])
-                )
-                .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(isDropTargeted ? Color.accentColor.opacity(0.08) : Color.clear)
-                )
-        )
-        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-            handleDrop(providers: providers)
-            return true
+        .padding(.vertical, 9)
+        .background(.bar)
+    }
+
+    private var activityPanel: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                Text(coordinator.log.isEmpty ? "Nothing has run yet." : coordinator.log)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(coordinator.log.isEmpty ? .secondary : .primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+                    .padding(10)
+                Color.clear.frame(height: 1).id("logEnd")
+            }
+            .frame(height: 150)
+            .background(Color(nsColor: .textBackgroundColor))
+            .onAppear { proxy.scrollTo("logEnd", anchor: .bottom) }
+            .onChange(of: coordinator.log) { _ in
+                proxy.scrollTo("logEnd", anchor: .bottom)
+            }
         }
     }
+
+    // MARK: - Helpers
 
     private func handleDrop(providers: [NSItemProvider]) {
         // Preserve drop order by indexing into a pre-allocated array.
@@ -259,139 +241,17 @@ struct ContentView: View {
         }
     }
 
-    private var queue: some View {
-        GroupBox {
-            if coordinator.jobs.isEmpty {
-                VStack(spacing: 6) {
-                    Text("No jobs yet")
-                        .font(.callout)
-                    Text("Each file you add becomes a disc. Settings on the left apply to every job; the audio, format and subtitles can be changed per job.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 380)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.vertical, 24)
-            } else {
-                ScrollView {
-                    VStack(spacing: 4) {
-                        ForEach(coordinator.jobs) { job in
-                            JobRow(
-                                job: job,
-                                plan: coordinator.plan(for: job),
-                                settings: coordinator.settings,
-                                onRemove: { coordinator.removeJob(job) },
-                                onRetry: { coordinator.retry(job) },
-                                onReveal: { reveal(job.outputURL) },
-                                onOpenLog: { if let log = job.logURL { NSWorkspace.shared.open(log) } },
-                                onAttachSubtitle: { attachSubtitle(to: job) },
-                                onClearSubtitle: { coordinator.setSubtitle(nil, for: job.id) },
-                                onSelectAudio: { coordinator.setAudioSource($0, for: job.id) },
-                                onSelectStandard: { coordinator.setStandardOverride($0, for: job.id) },
-                                onSelectSubtitleLanguage: { coordinator.setSubtitleLanguage($0, for: job.id) }
-                            )
-                            if job.id != coordinator.jobs.last?.id {
-                                Divider()
-                            }
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-            }
-        } label: {
-            Text("Queue")
-        }
-        .frame(maxHeight: .infinity)
-    }
-
-    private var logSection: some View {
-        DisclosureGroup(isExpanded: $showLog) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(coordinator.log.isEmpty ? "—" : coordinator.log)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(coordinator.log.isEmpty ? .secondary : .primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(6)
-                    Color.clear.frame(height: 1).id("logEnd")
-                }
-                .frame(height: 130)
-                .background(Color(nsColor: .textBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .onChange(of: coordinator.log) { _ in
-                    proxy.scrollTo("logEnd", anchor: .bottom)
-                }
-            }
-        } label: {
-            Text("Activity")
-                .font(.callout)
-        }
-    }
-
-    private var actionBar: some View {
-        HStack {
-            Button("Clear Done") { coordinator.clearFinished() }
-                .disabled(!coordinator.jobs.contains { $0.status == .done })
-            Spacer()
-            if coordinator.isRunning {
-                Button(role: .destructive) {
-                    coordinator.stop()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                        .frame(minWidth: 80)
-                }
-                .controlSize(.large)
-                .disabled(coordinator.stopRequested)
-                .help("Stops the current job and deletes its partial output. Other jobs stay in the queue.")
-            }
-            Button {
-                coordinator.start()
-            } label: {
-                HStack(spacing: 6) {
-                    if coordinator.isRunning {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "play.fill")
-                    }
-                    Text(coordinator.isRunning ? "Encoding…" : "Start Queue")
-                }
-                .frame(minWidth: 140)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .keyboardShortcut(.return, modifiers: .command)
-            .disabled(!coordinator.hasPendingJobs
-                      || coordinator.isRunning
-                      || coordinator.tools == nil)
-        }
-    }
-
-    // MARK: - Helpers
-
     private func pickFiles() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.movie, .quickTimeMovie, .mpeg4Movie, .folder]
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = true
+        panel.prompt = "Add"
         if panel.runModal() == .OK {
             let urls = panel.urls
             Task { @MainActor in
                 await coordinator.loadInputs(urls)
             }
-        }
-    }
-
-    private func chooseOutputFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = true
-        panel.prompt = "Save Here"
-        panel.message = "Choose where finished discs are saved"
-        if panel.runModal() == .OK, let url = panel.url {
-            coordinator.settings.outputFolderPath = url.path
         }
     }
 
@@ -417,6 +277,244 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Settings sidebar
+
+struct SettingsSidebar: View {
+    @EnvironmentObject private var coordinator: EncodeCoordinator
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Size", selection: $coordinator.settings.discSize) {
+                    Text("BD-25, single layer").tag(DiscSize.bd25)
+                    Text("BD-50, dual layer").tag(DiscSize.bd50)
+                }
+                Picker("Write", selection: $coordinator.settings.outputMode) {
+                    Text("BDMV folder").tag(OutputMode.bdmvFolder)
+                    Text("Disc image (.iso)").tag(OutputMode.iso)
+                    Text("M2TS for Toast").tag(OutputMode.m2tsOnly)
+                }
+                LabeledContent("Save to") {
+                    HStack(spacing: 6) {
+                        Text(coordinator.settings.outputFolder?.lastPathComponent ?? "Next to each master")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundStyle(.secondary)
+                            .help(coordinator.settings.outputFolderPath ?? "Each disc is written in the same folder as its master.")
+                        Menu {
+                            Button("Choose Folder…") { chooseOutputFolder() }
+                            if coordinator.settings.outputFolderPath != nil {
+                                Button("Next to Each Master") { coordinator.settings.outputFolderPath = nil }
+                            }
+                        } label: {
+                            Image(systemName: "folder")
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .accessibilityLabel("Change where discs are saved")
+                    }
+                }
+            } header: {
+                Text("Disc")
+            } footer: {
+                Footnote(outputHint)
+            }
+
+            Section {
+                Picker("Format", selection: $coordinator.settings.videoStandard) {
+                    Text("Match each master").tag(VideoStandard?.none)
+                    ForEach(VideoStandard.allCases) { Text($0.rawValue).tag(VideoStandard?.some($0)) }
+                }
+                Toggle("Two-pass encode", isOn: $coordinator.settings.twoPass)
+            } header: {
+                Text("Video")
+            } footer: {
+                Footnote(videoHint)
+            }
+
+            Section {
+                Picker("AC-3", selection: $coordinator.settings.audioBitrateKbps) {
+                    Text("448 kbps").tag(448)
+                    Text("640 kbps").tag(640)
+                }
+                .pickerStyle(.segmented)
+            } header: {
+                Text("Audio")
+            } footer: {
+                Footnote("5.1 uses the rate you pick. Stereo and mono stop at 448 kbps, and 7.1 is folded down to 5.1.")
+            }
+
+            Section {
+                Picker("Stops", selection: $coordinator.settings.chapters.mode) {
+                    Text("None").tag(ChaptersMode.none)
+                    Text("Every 5 minutes").tag(ChaptersMode.auto5)
+                    Text("Every 10 minutes").tag(ChaptersMode.auto10)
+                    Text("At times I list").tag(ChaptersMode.custom)
+                }
+                if coordinator.settings.chapters.mode == .custom {
+                    TextField("Times", text: $coordinator.settings.chapters.customText,
+                              prompt: Text("0:00, 5:30, 12:00"), axis: .vertical)
+                        .font(.system(.body, design: .monospaced))
+                        .lineLimit(2...4)
+                }
+            } header: {
+                Text("Chapters")
+            } footer: {
+                Footnote(chaptersHint)
+            }
+
+            Section {
+                EmptyView()
+            } footer: {
+                Footnote("Changes apply to every disc that hasn't started. Format, audio and subtitles can also be set on each disc.")
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var videoHint: String {
+        if coordinator.settings.videoStandard == nil {
+            return "Keeps every frame: 23.976 and 24 fps stay 1080p; 25 and 29.97 fps go on the disc as 1080i carrying whole frames, since Blu-ray has no 1080p at those rates."
+        }
+        return "Every disc uses this format unless you change it on the disc."
+    }
+
+    private var chaptersHint: String {
+        switch coordinator.settings.chapters.mode {
+        case .none:
+            return "The disc plays straight through with no skip points."
+        case .auto5, .auto10:
+            return "Next and Previous on the remote jump between stops. There's no on-screen menu."
+        case .custom:
+            return "Separate times with commas or new lines: 1:02:30, 5:30, or seconds."
+        }
+    }
+
+    private var outputHint: String {
+        switch coordinator.settings.outputMode {
+        case .bdmvFolder:
+            return "A folder you can burn with Toast or any Blu-ray authoring app."
+        case .iso:
+            return "One disc image, ready for a duplicator or hdiutil burn."
+        case .m2tsOnly:
+            return "One video file for building menus in Toast. Chapters aren't included."
+        }
+    }
+
+    private func chooseOutputFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "Save Here"
+        panel.message = "Choose where finished discs are saved"
+        if panel.runModal() == .OK, let url = panel.url {
+            coordinator.settings.outputFolderPath = url.path
+        }
+    }
+}
+
+/// Disc sizes are sold in decimal gigabytes, so show them that way.
+func formatGB(_ bytes: Int64) -> String {
+    let gb = Double(bytes) / 1_000_000_000
+    return gb >= 10 ? String(format: "%.1f GB", gb) : String(format: "%.2f GB", gb)
+}
+
+/// Section footnote: left-aligned and wrapping. The grouped form's default
+/// footer centres a short line and truncates a long one.
+private struct Footnote: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Disc badge
+
+/// The job's status drawn as a disc: blank while waiting, a lacquer-red
+/// ring filling around the rim while it encodes, a badge when it ends.
+struct DiscBadge: View {
+    let status: JobStatus
+    let progress: Double
+    let blocked: Bool
+    var showsBadge = true
+
+    var body: some View {
+        ZStack {
+            Canvas { ctx, size in
+                let rect = CGRect(origin: .zero, size: size).insetBy(dx: 2, dy: 2)
+                let center = CGPoint(x: rect.midX, y: rect.midY)
+                let r = rect.width / 2
+                let hub = Path(ellipseIn: CGRect(x: center.x - r * 0.3, y: center.y - r * 0.3,
+                                                 width: r * 0.6, height: r * 0.6))
+                let hole = Path(ellipseIn: CGRect(x: center.x - r * 0.1, y: center.y - r * 0.1,
+                                                  width: r * 0.2, height: r * 0.2))
+                let disc = Path(ellipseIn: rect)
+                if status == .pending || status == .cancelled {
+                    // A blank: outline only.
+                    ctx.stroke(disc, with: .color(.secondary.opacity(0.55)), lineWidth: 1.5)
+                    ctx.stroke(hub, with: .color(.secondary.opacity(0.35)), lineWidth: 1)
+                } else {
+                    ctx.fill(disc, with: .color(LacquerStyle.discBlack))
+                    ctx.fill(disc, with: .conicGradient(
+                        Gradient(colors: [.clear, LacquerStyle.discSheen.opacity(0.45), .clear, .clear,
+                                          LacquerStyle.discSheen.opacity(0.35), .clear, .clear]),
+                        center: center, angle: .degrees(-40)))
+                    // A faint rim keeps the black disc visible on a dark window.
+                    ctx.stroke(disc, with: .color(.white.opacity(0.18)), lineWidth: 1)
+                    ctx.fill(hub, with: .color(Color(white: 0.32)))
+                    ctx.fill(hole, with: .color(Color(nsColor: .windowBackgroundColor)))
+                }
+            }
+            if status == .running {
+                Circle()
+                    .trim(from: 0, to: max(0.02, progress))
+                    .stroke(LacquerStyle.lacquerBright, style: StrokeStyle(lineWidth: 3.5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .padding(1.75)
+                    .animation(.linear(duration: 0.4), value: progress)
+            }
+            if showsBadge, let badge {
+                Image(systemName: badge.symbol)
+                    .font(.system(size: 13, weight: .bold))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, badge.color)
+                    .background(Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(-1.5))
+                    .offset(x: 13, y: 13)
+            }
+        }
+        .frame(minWidth: 38, minHeight: 38)
+        .aspectRatio(1, contentMode: .fit)
+        .accessibilityElement()
+        .accessibilityLabel(accessibilityText)
+    }
+
+    private var badge: (symbol: String, color: Color)? {
+        switch status {
+        case .done: return ("checkmark.circle.fill", .green)
+        case .failed: return ("exclamationmark.circle.fill", .red)
+        case .cancelled: return ("stop.circle.fill", .gray)
+        case .pending: return blocked ? ("exclamationmark.circle.fill", .red) : nil
+        case .running: return nil
+        }
+    }
+
+    private var accessibilityText: String {
+        switch status {
+        case .running: return "Encoding, \(Int(progress * 100)) percent"
+        case .pending: return blocked ? "Won't fit" : "Waiting"
+        default: return status.rawValue
+        }
+    }
+}
+
 // MARK: - Job row
 
 struct JobRow: View {
@@ -432,6 +530,8 @@ struct JobRow: View {
     let onSelectAudio: (AudioSource) -> Void
     let onSelectStandard: (VideoStandard?) -> Void
     let onSelectSubtitleLanguage: (String) -> Void
+
+    @State private var isHovered = false
 
     /// ISO 639-2/B 3-letter codes for the languages a duplication-house disc
     /// is most likely to ship with. Players that filter subtitle tracks by
@@ -453,87 +553,111 @@ struct JobRow: View {
     ]
 
     private var info: MediaInfo { job.mediaInfo }
+    private var standard: VideoStandard { job.standard(with: settings) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                statusIcon
-                    .frame(width: 18)
+        HStack(alignment: .top, spacing: 16) {
+            DiscBadge(status: job.status, progress: job.progress,
+                      blocked: job.status == .pending && plan.isBlocked)
+                .frame(width: 38, height: 38)
+                .padding(.top, 1)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(job.inputURL.lastPathComponent)
-                        .font(.callout.weight(.medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(job.inputURL.path)
-                    if job.status == .running {
-                        progressLine
-                    } else {
-                        statusLine
-                    }
+            VStack(alignment: .leading, spacing: 9) {
+                header
+                sourceLine
+                switch job.status {
+                case .running:
+                    runningLine
+                case .done:
+                    doneLine
+                case .failed:
+                    Text(job.errorMessage ?? "Failed")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(8)
+                case .cancelled:
+                    Text("Stopped. The partial disc was deleted.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                case .pending:
+                    DiscFillBar(plan: plan, settings: settings)
                 }
-
-                Spacer(minLength: 8)
-
-                HStack(spacing: 10) {
-                    if job.status == .done {
-                        iconButton("folder", help: "Show the disc in Finder", action: onReveal)
-                    }
-                    if job.logURL != nil {
-                        iconButton("doc.text", help: "Open the job's log", action: onOpenLog)
-                    }
-                    if job.status.canRetry {
-                        iconButton("arrow.clockwise", help: "Put back in the queue", action: onRetry)
-                    }
-                    if job.status != .running {
-                        iconButton("xmark.circle.fill", help: "Remove from queue", action: onRemove)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            if job.status.isEditable {
-                VStack(alignment: .leading, spacing: 5) {
+                if job.status.isEditable {
                     warnings
-                    trackControls
+                    controls
                 }
-                .padding(.leading, 28)
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(isHovered ? Color.primary.opacity(0.03) : .clear)
+        .onHover { isHovered = $0 }
     }
 
-    private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).imageScale(.medium)
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(job.inputURL.lastPathComponent)
+                .font(.headline)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(job.inputURL.path)
+            Spacer(minLength: 8)
+            HStack(spacing: 12) {
+                if job.status == .done {
+                    iconButton("magnifyingglass", help: "Show the disc in Finder", action: onReveal)
+                }
+                if job.logURL != nil {
+                    iconButton("doc.text", help: "Open this disc's log", action: onOpenLog)
+                }
+                if job.status.canRetry {
+                    iconButton("arrow.clockwise", help: "Put it back in the queue", action: onRetry)
+                }
+                if job.status != .running {
+                    iconButton("xmark", help: "Remove from the queue", action: onRemove)
+                }
+            }
+            .foregroundStyle(.secondary)
+            .opacity(isHovered || job.status != .pending ? 1 : 0.55)
         }
-        .buttonStyle(.borderless)
-        .help(help)
-        .accessibilityLabel(help)
     }
 
-    private var progressLine: some View {
+    private var sourceLine: some View {
+        HStack(spacing: 6) {
+            Text(verbatim: "\(info.width)×\(info.height), \(VideoStandard.formatRate(info.frameRate)) fps\(info.sourceIsInterlaced ? " interlaced" : ""), \(formatDuration(info.duration))")
+            Image(systemName: "arrow.right")
+                .imageScale(.small)
+                .accessibilityLabel("becomes")
+            Text(standard.shortName)
+                .foregroundStyle(.primary)
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
+        .lineLimit(1)
+    }
+
+    private var runningLine: some View {
         HStack(spacing: 6) {
             Text(job.stage.rawValue)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 96, alignment: .leading)
-            ProgressView(value: job.progress)
-                .progressViewStyle(.linear)
             Text("\(Int(job.progress * 100))%")
-                .font(.caption)
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 36, alignment: .trailing)
+                .foregroundStyle(.primary)
             if let eta = remainingText {
-                Text(eta)
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: 84, alignment: .trailing)
+                Text(eta).monospacedDigit()
             }
         }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+    }
+
+    private var doneLine: some View {
+        Text(job.outputURL?.lastPathComponent ?? "Done")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
     }
 
     private var remainingText: String? {
@@ -542,63 +666,37 @@ struct JobRow: View {
         let remaining = elapsed * (1 - job.progress) / job.progress
         let f = DateComponentsFormatter()
         f.allowedUnits = remaining >= 3600 ? [.hour, .minute] : [.minute, .second]
-        f.unitsStyle = .abbreviated
-        return f.string(from: remaining).map { "\($0) left" }
+        f.unitsStyle = .short
+        return f.string(from: remaining).map { "about \($0) left" }
     }
 
-    @ViewBuilder
-    private var statusLine: some View {
-        switch job.status {
-        case .done:
-            Text("Done · \(job.outputURL?.lastPathComponent ?? "")")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        case .failed:
-            Text(job.errorMessage ?? "Failed")
-                .font(.caption)
-                .foregroundStyle(.red)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .lineLimit(6)
-        case .cancelled:
-            Text("Stopped. Partial output was deleted.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .pending, .running:
-            Text(summary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+    private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
         }
-    }
-
-    private var summary: String {
-        let standard = job.standard(with: settings)
-        let size = ByteCountFormatter.string(fromByteCount: plan.estimatedBytes, countStyle: .file)
-        return [
-            "\(info.width)×\(info.height) \(VideoStandard.formatRate(info.frameRate)) fps",
-            formatDuration(info.duration),
-            "→ \(standard.shortName)",
-            "\(plan.videoBitrate / 1000) kbps",
-            "\(settings.discSize.shortName) \(settings.outputMode.shortName)",
-            "~\(size)"
-        ].joined(separator: " · ")
+        .buttonStyle(.borderless)
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     @ViewBuilder
     private var warnings: some View {
-        ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, w in
-            Label {
-                Text(w.text)
-                    .font(.caption)
-                    .fixedSize(horizontal: false, vertical: true)
-            } icon: {
-                Image(systemName: icon(for: w.level))
-                    .foregroundStyle(color(for: w.level))
-                    .imageScale(.small)
+        if !plan.warnings.isEmpty {
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(Array(plan.warnings.enumerated()), id: \.offset) { _, w in
+                    Label {
+                        Text(w.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: icon(for: w.level))
+                            .foregroundStyle(color(for: w.level))
+                    }
+                    .font(.callout)
+                    .foregroundStyle(w.level == .info ? .secondary : .primary)
+                }
             }
         }
     }
@@ -619,122 +717,135 @@ struct JobRow: View {
         }
     }
 
-    @ViewBuilder
-    private var trackControls: some View {
+    private var controls: some View {
         let suggested = VideoStandard.suggested(forFrameRate: info.frameRate,
                                                 interlaced: info.sourceIsInterlaced)
-        let followLabel = settings.videoStandard.map { "Sidebar (\($0.shortName))" }
-            ?? "Match source (\(suggested.shortName))"
-        controlRow("film") {
-            Text("Format:")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Picker("Format for \(job.inputURL.lastPathComponent)", selection: Binding(
-                get: { job.standardOverride },
-                set: { onSelectStandard($0) }
-            )) {
-                Text(followLabel).tag(VideoStandard?.none)
-                ForEach(VideoStandard.allCases) { Text($0.rawValue).tag(VideoStandard?.some($0)) }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .controlSize(.small)
-            .fixedSize()
-        }
-
-        controlRow("waveform") {
-            Text("Audio:")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            let options = info.audioOptions
-            if options.count == 1, let only = options.first {
-                Text(only.label)
-                    .font(.caption)
-            } else {
-                Picker("Audio for \(job.inputURL.lastPathComponent)", selection: Binding(
-                    get: { job.audioSource },
-                    set: { onSelectAudio($0) }
+        let followLabel = settings.videoStandard.map { "Sidebar setting (\($0.shortName))" }
+            ?? "Match master (\(suggested.shortName))"
+        return Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 6) {
+            GridRow {
+                fieldLabel("Format")
+                Picker("Format for \(job.inputURL.lastPathComponent)", selection: Binding(
+                    get: { job.standardOverride },
+                    set: { onSelectStandard($0) }
                 )) {
-                    ForEach(options) { opt in
-                        Text(opt.label).tag(opt.source)
-                    }
+                    Text(followLabel).tag(VideoStandard?.none)
+                    ForEach(VideoStandard.allCases) { Text($0.rawValue).tag(VideoStandard?.some($0)) }
                 }
                 .labelsHidden()
-                .pickerStyle(.menu)
-                .controlSize(.small)
                 .fixedSize()
             }
+            GridRow {
+                fieldLabel("Audio")
+                let options = info.audioOptions
+                if options.count == 1, let only = options.first {
+                    Text(only.label)
+                        .font(.callout)
+                } else {
+                    Picker("Audio for \(job.inputURL.lastPathComponent)", selection: Binding(
+                        get: { job.audioSource },
+                        set: { onSelectAudio($0) }
+                    )) {
+                        ForEach(options) { opt in
+                            Text(opt.label).tag(opt.source)
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                }
+            }
+            GridRow {
+                fieldLabel("Subtitles")
+                if let sub = job.subtitleURL {
+                    HStack(spacing: 8) {
+                        Text(sub.lastPathComponent)
+                            .font(.callout)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: 220, alignment: .leading)
+                        Picker("Subtitle language", selection: Binding(
+                            get: { job.subtitleLanguageCode.isEmpty ? "eng" : job.subtitleLanguageCode },
+                            set: { onSelectSubtitleLanguage($0) }
+                        )) {
+                            ForEach(Self.subtitleLanguageOptions, id: \.code) { opt in
+                                Text(opt.label).tag(opt.code)
+                            }
+                        }
+                        .labelsHidden()
+                        .fixedSize()
+                        .help("The language players show for this subtitle track")
+                        Button("Remove", action: onClearSubtitle)
+                            .buttonStyle(.link)
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        Button("Add .srt…", action: onAttachSubtitle)
+                        Text("Viewers can turn them on and off.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
         }
+        .controlSize(.small)
+        .padding(.top, 2)
+    }
 
-        controlRow("captions.bubble") {
-            if let sub = job.subtitleURL {
-                Text("Subtitles: \(sub.lastPathComponent)")
-                    .font(.caption)
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .gridColumnAlignment(.trailing)
+    }
+}
+
+// MARK: - Disc fill
+
+/// How much of the disc this film will take, and the video bitrate that
+/// buys. The bitrate is the number that decides picture quality, so it sits
+/// next to the bar instead of in a tooltip.
+struct DiscFillBar: View {
+    let plan: EncodePlan
+    let settings: EncodeSettings
+
+    var body: some View {
+        let mbps = Double(plan.videoBitrate) / 1_000_000
+        let rate = String(format: "%.1f Mbps", mbps)
+        let size = formatGB(plan.estimatedBytes)
+        if settings.outputMode == .m2tsOnly {
+            Text("About \(size), video at \(rate)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        } else {
+            let disc = settings.discSize
+            let fraction = min(Double(plan.estimatedBytes) / Double(disc.capacityBytes), 1)
+            let capacity = disc == .bd25 ? "25 GB" : "50 GB"
+            HStack(spacing: 12) {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.primary.opacity(0.08))
+                        Capsule()
+                            .fill(fillColor)
+                            .frame(width: max(6, geo.size.width * fraction))
+                    }
+                }
+                .frame(width: 150, height: 6)
+                .accessibilityHidden(true)
+                Text(plan.isBlocked
+                     ? "Won't fit on \(disc.shortName)"
+                     : "\(size) of \(capacity), video at \(rate)")
+                    .font(.callout)
+                    .foregroundStyle(plan.isBlocked ? .red : .secondary)
+                    .monospacedDigit()
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                Picker("Subtitle language", selection: Binding(
-                    get: { job.subtitleLanguageCode.isEmpty ? "eng" : job.subtitleLanguageCode },
-                    set: { onSelectSubtitleLanguage($0) }
-                )) {
-                    ForEach(Self.subtitleLanguageOptions, id: \.code) { opt in
-                        Text("\(opt.label) (\(opt.code))").tag(opt.code)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .controlSize(.small)
-                .fixedSize()
-                .help("Language tag on the subtitle track. Players that pick subtitles by preferred language read this.")
-                Button("Remove", action: onClearSubtitle)
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-            } else {
-                Button("Add SRT…", action: onAttachSubtitle)
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                Text("optional, viewers can turn them on and off")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
     }
 
-    private func controlRow<Content: View>(_ symbol: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: symbol)
-                .imageScale(.small)
-                .foregroundStyle(.secondary)
-                .frame(width: 14)
-            content()
-        }
-    }
-
-    private var statusIcon: some View {
-        statusSymbol
-            .accessibilityLabel(job.status.rawValue)
-    }
-
-    @ViewBuilder
-    private var statusSymbol: some View {
-        switch job.status {
-        case .pending:
-            if plan.isBlocked {
-                Image(systemName: "xmark.octagon").foregroundStyle(.red)
-            } else {
-                Image(systemName: "circle").foregroundStyle(.secondary)
-            }
-        case .running:
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .foregroundStyle(.blue)
-        case .done:
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-        case .failed:
-            Image(systemName: "xmark.octagon.fill")
-                .foregroundStyle(.red)
-        case .cancelled:
-            Image(systemName: "stop.circle")
-                .foregroundStyle(.secondary)
-        }
+    private var fillColor: Color {
+        if plan.isBlocked { return .red }
+        if plan.videoBitrate < BluRayEncoder.videoBitrateQualityFloor { return .orange }
+        return Color.accentColor.opacity(0.75)
     }
 }
