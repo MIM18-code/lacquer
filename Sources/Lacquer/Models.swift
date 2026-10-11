@@ -103,6 +103,12 @@ enum VideoStandard: String, CaseIterable, Identifiable, Codable, Sendable {
         }
     }
 
+    /// Start time of the frame nearest to `seconds`. Chapter marks sit on
+    /// frame starts so the encoder can put an IDR frame exactly there.
+    func frameStart(nearest seconds: Double) -> Double {
+        (seconds * frameRateValue).rounded() / frameRateValue
+    }
+
     /// Keyint: Blu-ray limits GOP to ~1 second.
     var keyint: Int {
         switch self {

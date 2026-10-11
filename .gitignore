@@ -10,3 +10,4 @@ build/
 packaging/vendor/
 packaging/dist/
 .claude/
+Scripts/menu-check/menu_check
