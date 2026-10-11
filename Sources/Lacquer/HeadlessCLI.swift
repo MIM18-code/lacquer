@@ -8,9 +8,12 @@ enum HeadlessCLI {
            [--disc bd25|bd50] [--standard auto|1080p23.976|1080p24|1080i29.97|1080i25|720p59.94|720p50|720p23.976|720p24]
            [--audio auto|N|mono5.1|mono5.1-film|monostereo|silence] [--audio-kbps 448|640]
            [--one-pass] [--chapters none|5|10|"00:00,05:30"] [--srt FILE] [--srt-lang eng]
+           [--menu fullFrame|titleCard|typographic [--menu-title TEXT] [--menu-subtitle TEXT]]
            [--menu-demo [--menu-loop SECONDS]] [--plan-only]
            --headless --iso-from BDMV_FOLDER --output FILE.iso [--label NAME]
 
+    --menu designs a menu in one of the three styles, with a still from the
+    film as the background, exactly as the app's menu designer would;
     --menu-demo adds a generated menu (Play, Scenes, Subtitles) to the disc;
     --menu-loop 0 makes it a still menu instead of a 30 s loop.
     --iso-from writes an existing BDMV folder as a UDF 2.50 disc image.
@@ -112,6 +115,16 @@ enum HeadlessCLI {
             subtitle: opts["--srt"].map { URL(fileURLWithPath: $0) },
             subtitleLanguage: opts["--srt-lang"] ?? "eng"
         )
+        if let style = opts["--menu"] {
+            guard let preset = MenuStylePreset(rawValue: style) else {
+                return fail("unknown --menu \(style); use fullFrame, titleCard or typographic", code: 2)
+            }
+            var template = MenuTemplate.suggested(forFilm: input, duration: info.duration)
+            template.style = preset
+            if let title = opts["--menu-title"] { template.title = title }
+            if let subtitle = opts["--menu-subtitle"] { template.subtitle = subtitle }
+            request.menuTemplate = template
+        }
         if flags.contains("--menu-demo") {
             request.menu = MenuDemo.make(
                 title: input.deletingPathExtension().lastPathComponent,
@@ -125,6 +138,9 @@ enum HeadlessCLI {
         let plan = EncodePlan.make(request, capabilities: caps)
         print("source: \(info.width)x\(info.height) \(VideoStandard.formatRate(info.frameRate)) fps\(info.sourceIsInterlaced ? " interlaced" : "") \(info.videoCodec) \(formatDuration(info.duration))")
         print("plan: \(standard.shortName) · \(plan.videoBitrate / 1000) kbps video · \(info.label(for: audio)) → AC-3 \(plan.audioBitrateKbps) kbps · ~\(ByteCountFormatter.string(fromByteCount: plan.estimatedBytes, countStyle: .file))")
+        if let template = request.menuTemplate {
+            print("menu: \(template.style.displayName) design, rendered after the checks")
+        }
         if let menu = request.menu {
             print("menu: \(menu.pages.count) pages, \(menu.pages.map { "\($0.buttons.count)" }.joined(separator: "/")) buttons")
         }
