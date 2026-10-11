@@ -135,6 +135,7 @@ enum HeadlessCLI {
                 request.menu?.loopSeconds = seconds
             }
         }
+        request.writesMenuMap = request.wantsMenu
         let plan = EncodePlan.make(request, capabilities: caps)
         print("source: \(info.width)x\(info.height) \(VideoStandard.formatRate(info.frameRate)) fps\(info.sourceIsInterlaced ? " interlaced" : "") \(info.videoCodec) \(formatDuration(info.duration))")
         print("plan: \(standard.shortName) · \(plan.videoBitrate / 1000) kbps video · \(info.label(for: audio)) → AC-3 \(plan.audioBitrateKbps) kbps · ~\(ByteCountFormatter.string(fromByteCount: plan.estimatedBytes, countStyle: .file))")
