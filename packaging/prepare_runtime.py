@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.request
 import zipfile
@@ -40,9 +41,14 @@ VENDOR = PKG / 'vendor'
 SOURCES_JSON = PKG / 'runtime-sources.json'
 RUNTIME = VENDOR / 'runtime'
 # autotools and FFmpeg's configure break on spaces in paths, and this repo lives
-# in a folder with spaces, so the build tree sits in a space-free cache folder.
+# in a folder with spaces, so the build tree sits in a space-free folder. The
+# default is user-neutral on purpose: FFmpeg records its --prefix in the binary
+# and in `ffmpeg -version`, and the release must not carry a home directory.
 # Override with RUNTIME_BUILD_DIR. Logs are copied back to vendor/build-logs/.
-BUILD = Path(os.environ.get('RUNTIME_BUILD_DIR') or (Path.home() / 'Library/Caches/lacquer-runtime-build'))
+BUILD = Path(os.environ.get('RUNTIME_BUILD_DIR') or '/private/tmp/lacquer-runtime-build')
+# Where a source tarball keeps the upstream archives (see emit_sources). Checked
+# when a file is not in vendor/, so a tarball rebuilds offline.
+UPSTREAM_DIRS = [Path(p) for p in (os.environ.get('RUNTIME_UPSTREAM_DIR'), str(ROOT.parent / 'upstream')) if p]
 PREFIX = BUILD / 'prefix'
 LOGS = BUILD / 'logs'
 
@@ -102,6 +108,17 @@ def fetch(entry):
     """Download if missing, then verify. Never trusts a file with a wrong hash."""
     path = VENDOR / entry['file']
     if not path.exists():
+        # Offline rebuild from a source tarball: take the archive from upstream/,
+        # but only if it matches the pinned hash (same rule as a download).
+        for d in UPSTREAM_DIRS:
+            cand = d / entry['file']
+            if cand.is_file():
+                if sha256(cand) != entry['sha256']:
+                    raise SystemExit('HASH MISMATCH for %s\n  got  %s\n  want %s' % (cand, sha256(cand), entry['sha256']))
+                shutil.copy2(cand, path)
+                say('using %s' % cand)
+                break
+    if not path.exists():
         say('downloading %s' % entry['url'])
         tmp = path.with_name(path.name + '.download')
         req = urllib.request.Request(entry['url'], headers={'User-Agent': 'lacquer-build'})
@@ -116,6 +133,39 @@ def fetch(entry):
     if got != entry['sha256']:
         raise SystemExit('HASH MISMATCH for %s\n  got  %s\n  want %s\nDelete it to re-download, or fix runtime-sources.json deliberately.' % (path, got, entry['sha256']))
     return path
+
+
+def verify_ffmpeg_signature(sources, inputs):
+    """Check the FFmpeg tarball's detached signature with gpg, in a throwaway keyring.
+
+    The key file is pinned by SHA-256 (it is a source entry) and the signer must
+    be the pinned fingerprint. Skipped with a notice when gpg is not installed.
+    Returns a one-line result for BUILD.txt.
+    """
+    sig = sources['ffmpeg_sig']
+    fpr = sig['signer_fingerprint']
+    gpg = shutil.which('gpg', path=BUILD_PATH)
+    if not gpg:
+        say('gpg not installed: FFmpeg signature not checked (SHA-256 still verified)')
+        return 'FFmpeg .asc signature: not checked (gpg not installed); SHA-256 verified'
+    home = tempfile.mkdtemp(prefix='gnupg-', dir='/tmp')
+    os.chmod(home, 0o700)
+    env = dict(os.environ, GNUPGHOME=home)
+    try:
+        subprocess.run([gpg, '--batch', '--quiet', '--import', str(inputs['ffmpeg_key'])],
+                       env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.run([gpg, '--batch', '--status-fd', '1', '--verify',
+                               str(inputs['ffmpeg_sig']), str(inputs['ffmpeg'])],
+                              env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        good = [l.split() for l in proc.stdout.splitlines() if l.startswith('[GNUPG:] VALIDSIG')]
+        if proc.returncode != 0 or not good or good[0][-1] != fpr:
+            raise SystemExit('FFmpeg signature check FAILED (expected signer %s):\n%s' % (fpr, proc.stdout))
+    finally:
+        subprocess.run(['gpgconf', '--kill', 'all'], env=env, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.rmtree(home, ignore_errors=True)
+    say('FFmpeg signature OK (signer %s)' % fpr)
+    return 'FFmpeg .asc signature: good, signer %s' % fpr
 
 
 def run(cmd, cwd, log, env):
@@ -136,18 +186,37 @@ def extract_tar(archive, dest):
     subprocess.run(['tar', '-xf', str(archive), '-C', str(dest), '--strip-components', '1'], check=True)
 
 
+BUILD_PATH = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin'
+
+
+def find_tools():
+    """Check the build toolchain up front. Returns the pkg-config command name."""
+    missing = []
+    for tool in ('clang', 'make', 'autoconf', 'automake', 'xcrun', 'tar', 'strip'):
+        if not shutil.which(tool, path=BUILD_PATH):
+            missing.append(tool)
+    if not (shutil.which('glibtoolize', path=BUILD_PATH) or shutil.which('libtoolize', path=BUILD_PATH)):
+        missing.append('libtool')
+    pkg_config = next((n for n in ('pkg-config', 'pkgconf') if shutil.which(n, path=BUILD_PATH)), None)
+    if not pkg_config:
+        missing.append('pkg-config')
+    if missing:
+        raise SystemExit('Missing build tools: %s\nInstall Xcode command line tools, then: brew install autoconf automake libtool pkg-config' % ', '.join(missing))
+    return pkg_config
+
+
 def build_env(min_macos):
     if ' ' in str(BUILD):
         raise SystemExit('Build directory must not contain spaces: %s' % BUILD)
     env = {
-        'PATH': '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin',
+        'PATH': BUILD_PATH,
         'HOME': os.environ.get('HOME', ''),
         'LANG': 'C',
         'MACOSX_DEPLOYMENT_TARGET': min_macos,
         # Only our own prefix: a Homebrew x264.pc or zimg.pc must never leak in.
         'PKG_CONFIG_LIBDIR': str(PREFIX / 'lib/pkgconfig'),
         'PKG_CONFIG_PATH': '',
-        'LIBTOOLIZE': 'glibtoolize',
+        'LIBTOOLIZE': 'glibtoolize' if shutil.which('glibtoolize', path=BUILD_PATH) else 'libtoolize',
         'CC': 'clang',
         'CXX': 'clang++',
         'SDKROOT': subprocess.check_output(['xcrun', '--show-sdk-path'], text=True).strip(),
@@ -164,6 +233,7 @@ def stamp_value(min_macos):
 
 
 def build_all(sources, inputs, min_macos):
+    pkg_config = find_tools()
     env = build_env(min_macos)
     jobs = str(os.cpu_count() or 4)
     common_cflags = '-O2 -mmacosx-version-min=%s -ffile-prefix-map=%s=.' % (min_macos, BUILD)
@@ -214,7 +284,7 @@ def build_all(sources, inputs, min_macos):
            '--enable-videotoolbox', '--enable-audiotoolbox',
            '--enable-zlib', '--enable-bzlib', '--enable-iconv',
            '--disable-network', '--disable-doc', '--disable-ffplay', '--disable-debug',
-           '--pkg-config=/opt/homebrew/bin/pkg-config', '--pkg-config-flags=--static',
+           '--pkg-config=%s' % pkg_config, '--pkg-config-flags=--static',
            '--extra-cflags=%s -I%s/include' % (common_cflags, PREFIX),
            '--extra-ldflags=-mmacosx-version-min=%s -L%s/lib' % (min_macos, PREFIX),
            '--extra-libs=-lc++ -liconv']
@@ -289,11 +359,18 @@ def verify(bin_dir):
     if missing:
         raise SystemExit('Required components missing from ffmpeg: ' + ', '.join(missing))
     # ffprobe must come from the same build
-    pv = ff(bin_dir / 'ffprobe', '-version').splitlines()[0]
-    fv = version.splitlines()[0]
-    if pv.split()[2] != fv.split()[2]:
-        raise SystemExit('ffprobe/ffmpeg version mismatch: %s vs %s' % (pv, fv))
-    return report, fv
+    # Same build: identical `configuration:` line, and every libav*/libsw* version
+    # ffprobe reports must match ffmpeg's (ffprobe does not link libswresample, so
+    # it prints fewer lines), so a stale ffprobe from another build cannot slip in.
+    pver = ff(bin_dir / 'ffprobe', '-version')
+    pv, fv = pver.splitlines(), version.splitlines()
+    conf = lambda lines: [l for l in lines if l.startswith('configuration:')]
+    libs = lambda lines: [l for l in lines if l.startswith(('libav', 'libsw', 'libpostproc'))]
+    ok = (pv[0].split()[2] == fv[0].split()[2] and conf(pv) and conf(pv) == conf(fv)
+          and libs(pv) and all(l in libs(fv) for l in libs(pv)))
+    if not ok:
+        raise SystemExit('ffprobe and ffmpeg come from different builds:\n--- ffmpeg\n%s\n--- ffprobe\n%s' % (version, pver))
+    return report, fv[0]
 
 
 def build_runtime(args):
@@ -302,6 +379,7 @@ def build_runtime(args):
     VENDOR.mkdir(parents=True, exist_ok=True)
     sources = load_sources()
     inputs = {name: fetch(entry) for name, entry in sources.items()}
+    sig_result = verify_ffmpeg_signature(sources, inputs)
     if args.fetch_only:
         say('sources verified')
         return
@@ -355,6 +433,7 @@ def build_runtime(args):
     xl = legal / 'x264'
     xl.mkdir()
     shutil.copy2(trees['x264'] / 'COPYING', xl / 'COPYING')
+    shutil.copy2(trees['x264'] / 'AUTHORS', xl / 'AUTHORS')
     zl = legal / 'zimg'
     zl.mkdir()
     shutil.copy2(trees['zimg'] / 'COPYING', zl / 'COPYING')
@@ -363,6 +442,13 @@ def build_runtime(args):
     with tarfile.open(inputs['tsmuxer_source']) as t:
         member = next(m for m in t.getmembers() if m.name.count('/') == 1 and m.name.endswith('/LICENSE'))
         (tl / 'LICENSE').write_bytes(t.extractfile(member).read())
+
+    pl = legal / 'libpng'  # statically linked into the upstream tsMuxeR binary
+    pl.mkdir()
+    with tarfile.open(inputs['libpng_source']) as t:
+        for fname in ('LICENSE', 'AUTHORS'):
+            member = next(m for m in t.getmembers() if m.name.count('/') == 1 and m.name.endswith('/' + fname))
+            (pl / fname).write_bytes(t.extractfile(member).read())
 
     xcode = subprocess.check_output(['xcodebuild', '-version'], text=True).replace('\n', ' ').strip()
     clang = subprocess.check_output(['clang', '--version'], text=True).splitlines()[0]
@@ -374,6 +460,7 @@ def build_runtime(args):
                  'Source archives (SHA-256 verified before use):']
     for name, e in sources.items():
         build_txt.append('  %-15s %s  %s' % (name, e['sha256'], e['url']))
+    build_txt += ['', sig_result]
     build_txt += ['', 'Exact configure lines (build order: zimg, x264, ffmpeg):', '']
     for name in ('zimg', 'x264', 'ffmpeg'):
         build_txt += ['[%s]' % name, lines[name], '']
@@ -384,6 +471,12 @@ def build_runtime(args):
     (legal / 'BUILD.txt').write_text('\n'.join(build_txt) + '\n')
     shutil.copy2(SOURCES_JSON, legal / 'runtime-sources.json')
     shutil.copy2(Path(__file__), legal / 'prepare_runtime.py')
+
+    # Nothing personal may ship: no home directory in the tools or the build record.
+    home = str(Path.home()).encode()
+    for f in [bin_dir / n for n in ('ffmpeg', 'ffprobe', 'tsMuxeR')] + [legal / 'BUILD.txt']:
+        if home in f.read_bytes():
+            raise SystemExit('%s contains the build user\'s home path %s; set RUNTIME_BUILD_DIR to a neutral folder' % (f.name, home.decode()))
 
     manifest = {}
     for p in sorted(RUNTIME.rglob('*')):
@@ -402,9 +495,6 @@ def emit_sources(dest):
     sources = load_sources()
     for entry in sources.values():
         shutil.copy2(fetch(entry), dest / entry['file'])
-    asc = VENDOR / 'ffmpeg-9.0.2.tar.xz.asc'
-    if asc.exists():
-        shutil.copy2(asc, dest)
     shutil.copy2(SOURCES_JSON, dest)
     shutil.copy2(Path(__file__), dest)
     say('source archives written to %s' % dest)

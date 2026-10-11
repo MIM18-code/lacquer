@@ -4,7 +4,7 @@ Paste everything below the line into Codex. It assumes the notarized DMG exists 
 
 ---
 
-Test the Mac app Lacquer through its real GUI, using computer use, and write up every defect you find. Lacquer turns a finished film master (ProRes, H.264, HEVC in MOV/MP4/MXF/MKV) into a Blu-ray: a BDMV folder, a UDF 2.50 ISO, or an M2TS. The repo is `/Users/joshualand/Documents/Blu Ray Compression App`; `README.md` describes what the app should do and `HANDOFF.md` lists recent changes. The encode logic already has unit tests and an end-to-end script (`Scripts/e2e_test.sh`). This pass is about what a person sees and clicks: layout, wording, state changes, error handling, and whether the files it writes match what the UI promised.
+Test the Mac app Lacquer through its real GUI, using computer use, and write up every defect you find. Lacquer turns a finished film master (ProRes, H.264, HEVC in MOV/MP4/MXF/MKV) into a Blu-ray: a BDMV folder, a UDF 2.50 ISO, or an M2TS. The repo is `~/Documents/Blu Ray Compression App`; `README.md` describes what the app should do and `HANDOFF.md` lists recent changes. The encode logic already has unit tests and an end-to-end script (`Scripts/e2e_test.sh`). This pass is about what a person sees and clicks: layout, wording, state changes, error handling, and whether the files it writes match what the UI promised.
 
 ## Ground rules
 
