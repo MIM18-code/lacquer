@@ -430,6 +430,7 @@ struct EncodePipeline {
             throw fail("Disc authoring", error)
         }
         succeeded = true
+        Self.makeReadable(target)
         log.closeWithStatus("OK")
         onLog("  ✓ wrote \(target.lastPathComponent)")
         onStage(.done, 1)
@@ -451,6 +452,21 @@ struct EncodePipeline {
               lang.count == 3, lang != "und", lang.allSatisfy({ $0.isASCII && $0.isLetter })
         else { return "eng" }
         return lang
+    }
+
+    /// tsMuxeR creates its files owner-only (0640). Open them up to 0644 so
+    /// the disc can be read from a shared drive or by another user account.
+    static func makeReadable(_ target: URL) {
+        let fm = FileManager.default
+        var paths = [target.path]
+        if let walker = fm.enumerator(atPath: target.path) {
+            paths += walker.compactMap { ($0 as? String).map { (target.path as NSString).appendingPathComponent($0) } }
+        }
+        for path in paths {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: path, isDirectory: &isDir) else { continue }
+            try? fm.setAttributes([.posixPermissions: isDir.boolValue ? 0o755 : 0o644], ofItemAtPath: path)
+        }
     }
 
     static func isWritable(_ folder: URL) -> Bool {

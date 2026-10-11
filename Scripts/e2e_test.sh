@@ -103,6 +103,35 @@ if run --mode iso --input "$FX/quote \"name\".mov"; then
     check "audio channels" "$(probe "$m/BDMV/STREAM/00000.m2ts" a:0 channels)" "2"
 fi
 
+echo "== review regressions: anamorphic, late audio, cover art, short clip"
+# Anamorphic NTSC widescreen: a 120×120 stored square must come out 32:27 wide.
+ff_box="drawbox=x=300:y=180:w=120:h=120:c=white:t=fill"
+"$FF" "${q[@]}" -f lavfi -i "color=c=black:s=720x480:r=24000/1001:d=3,$ff_box" -vf setsar=32/27 -c:v libx264 -preset ultrafast "$FX/anamorphic.mov"
+# Audio that starts one second after the picture.
+"$FF" "${q[@]}" -f lavfi -i "testsrc2=s=1280x720:r=24:d=5" -itsoffset 1 -f lavfi -i "sine=f=1000:d=4" -c:v libx264 -preset ultrafast -c:a pcm_s16le "$FX/late.mov"
+# Cover art stored before the film's video stream.
+"$FF" "${q[@]}" -f lavfi -i color=c=blue:s=64x64 -frames:v 1 "$FX/cover.png"
+"$FF" "${q[@]}" -f lavfi -i "testsrc2=s=1920x1080:r=24:d=3" -i "$FX/cover.png" -map 1:v -map 0:v -c:v:0 png -c:v:1 libx264 -preset ultrafast -disposition:v:0 attached_pic "$FX/covered.mp4"
+# Three seconds of flat grey: tiny output that must still pass the size check.
+"$FF" "${q[@]}" -f lavfi -i "color=c=gray:s=320x240:r=24:d=3" -c:v libx264 "$FX/short.mov"
+if run --mode m2ts --standard 1080p23.976 --input "$FX/anamorphic.mov"; then
+    "$FF" "${q[@]}" -ss 1 -i "$OUT/anamorphic_BluRay.m2ts" -frames:v 1 -vf "crop=1920:1080,format=gray" -f rawvideo "$WORK/frame.gray"
+    ratio="$(python3 -c "
+import sys
+w, h, d = 1920, 1080, open(sys.argv[1], 'rb').read()
+xs = [i % w for i, b in enumerate(d) if b > 128]; ys = [i // w for i, b in enumerate(d) if b > 128]
+print('%.2f' % ((max(xs) - min(xs) + 1) / (max(ys) - min(ys) + 1)))" "$WORK/frame.gray")"
+    check "anamorphic square shape (32:27 ≈ 1.18)" "$ratio" "1.18"
+fi
+if run --mode m2ts --input "$FX/late.mov"; then
+    end="$("$FF" -hide_banner -i "$OUT/late_BluRay.m2ts" -map 0:a -af silencedetect=n=-50dB:d=0.3 -f null - 2>&1 | awk '/silence_end/ {print int($5 * 10 + 0.5) / 10; exit}')"
+    check "late audio keeps its 1 s offset" "$end" "1"
+fi
+if run --mode m2ts --input "$FX/covered.mp4"; then
+    check "film used, not cover art" "$(probe "$OUT/covered_BluRay.m2ts" v:0 width)" "1920"
+fi
+for m in m2ts bdmv iso; do run --mode "$m" --input "$FX/short.mov" && check "3 s clip as $m" ok ok; done
+
 echo "== too long for the disc is refused before encoding"
 # 60 hours at 1 fps: past what BD-25 holds even at the 1 Mbps floor.
 "$FF" "${q[@]}" -f lavfi -i color=c=black:s=64x64:r=1:d=216000 -c:v libx264 -preset ultrafast "$FX/marathon.mkv"
