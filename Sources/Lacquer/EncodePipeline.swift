@@ -16,6 +16,9 @@ struct EncodeRequest: Sendable {
     var menuTemplate: MenuTemplate?
 
     var wantsMenu: Bool { menu != nil || menuTemplate != nil }
+    /// Write `<name>.menu.json` (see `HDMVMenuAuthor.MenuMap`) next to the
+    /// disc. Headless and debugging only; the app doesn't set it.
+    var writesMenuMap = false
 
     init(job: EncodeJob, settings: EncodeSettings) {
         self.input = job.inputURL
@@ -449,6 +452,7 @@ struct EncodePipeline {
         log.section("MUX / AUTHOR")
         let author = BDMVAuthor(tsMuxeR: tools.tsMuxeR)
         let lang = Self.audioLanguage(req)
+        var menuMap: HDMVMenuAuthor.MenuMap?
         do {
             try Task.checkCancellation()
             switch settings.outputMode {
@@ -468,7 +472,7 @@ struct EncodePipeline {
                     subtitle: subtitleTrack, languageCode: lang, logger: log)
                 if let menu = req.menu {
                     log.section("DISC MENU")
-                    try await HDMVMenuAuthor(ffmpeg: tools.ffmpeg)
+                    menuMap = try await HDMVMenuAuthor(ffmpeg: tools.ffmpeg)
                         .author(menu, disc: target, workDir: workDir, logger: log, onLog: onLog)
                 }
             case .iso where req.menu != nil:
@@ -485,7 +489,7 @@ struct EncodePipeline {
                 try? fm.removeItem(at: videoOut)
                 try? fm.removeItem(at: audioOut)
                 log.section("DISC MENU")
-                try await HDMVMenuAuthor(ffmpeg: tools.ffmpeg)
+                menuMap = try await HDMVMenuAuthor(ffmpeg: tools.ffmpeg)
                     .author(req.menu!, disc: folder, workDir: workDir, logger: log, onLog: onLog)
                 log.section("UDF 2.50 IMAGE")
                 let label = BDMVAuthor.discLabel(for: req.input.deletingPathExtension().lastPathComponent)
@@ -506,6 +510,12 @@ struct EncodePipeline {
         }
         succeeded = true
         Self.makeReadable(target)
+        if req.writesMenuMap, var map = menuMap {
+            map.chapters = plan.chapterTimes
+            let mapURL = URL(fileURLWithPath: base.path + ".menu.json")
+            try? map.json().write(to: mapURL)
+            onLog("  menu map: \(mapURL.path)")
+        }
         log.closeWithStatus("OK")
         onLog("  ✓ wrote \(target.lastPathComponent)")
         onStage(.done, 1)

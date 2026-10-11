@@ -1,20 +1,25 @@
 /*
  * menu_check: plays a Lacquer menu disc through libbluray's HDMV navigation
- * (the code VLC uses for Blu-ray menus) and checks that the menu works.
+ * (the code VLC uses for Blu-ray menus) and checks it against the menu map
+ * the headless CLI writes next to the disc (<name>.menu.json):
  *
- *   menu_check DISC --chapters 0,20,40 [--subtitles] [--still] [--verbose]
+ *   menu_check DISC --map DISC_NAME.menu.json [--verbose]
  *
- * --still: the menu is a still (infinite PlayItem still) rather than a
- * loop, so check that it holds instead of checking the loop restart.
+ * DISC is a BDMV folder or an ISO. For every page in the map:
+ *   - entering it draws exactly its buttons with the default one selected;
+ *   - every up/down/left/right edge moves the selection where the map says,
+ *     and a missing edge leaves it alone;
+ *   - every button does what its action says: playFilm starts the film at
+ *     0 s in chapter 1, playChapter(n) starts chapter n+1 at its time,
+ *     goToPage(q) opens page q, setSubtitles keeps the menu up and the film
+ *     then plays with subtitle stream 1 shown or hidden;
+ * and Top Menu from the film returns to the first page, and the selection
+ * survives the menu clip looping (or a still menu holds).
  *
- * DISC is a BDMV folder or an ISO. The checks assume the layout of
- * Lacquer's --menu-demo menu: a main page of Play, Scenes and (with
- * --subtitles) Subtitles On / Subtitles Off stacked vertically; scene pages
- * of chapter buttons in rows of four with Back and Next below; the film as
- * playlist 00000 and menu page p as playlist 01000 + p.
- *
- * Button states are told apart by brightness, as the demo draws them:
- * normal is a dark plate, selected amber, activated white.
+ * libbluray doesn't export its player registers, so the selected button
+ * comes from the overlay: each draw's position names the button, and the
+ * FNV-1a of its palette indices names the state (the map lists the hash of
+ * every button's normal, selected and activated image).
  *
  * Prints one PASS/FAIL line per check and exits non-zero on any failure.
  */
@@ -22,31 +27,177 @@
 #include <libbluray/keys.h>
 #include <libbluray/log_control.h>
 #include <libbluray/overlay.h>
+#include <ctype.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define FILM_PLAYLIST 0
-#define MENU_PLAYLIST 1000
-#define MAX_DRAWS 1024
+/* ---------------------------------------------------------------- JSON */
+
+enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ };
+typedef struct J {
+    int type;
+    double num;
+    char *str;
+    struct J **items;
+    char **keys;
+    int n;
+} J;
+
+static const char *jp;
+static void jws(void) { while (*jp && isspace((unsigned char)*jp)) jp++; }
+
+static J *jnew(int type) { J *j = calloc(1, sizeof *j); j->type = type; return j; }
+
+static char *jstring(void)
+{
+    const char *start = ++jp;
+    while (*jp && *jp != '"') { if (*jp == '\\') jp++; jp++; }
+    size_t len = (size_t)(jp - start);
+    char *s = malloc(len + 1);
+    memcpy(s, start, len); s[len] = 0;
+    if (*jp) jp++;
+    return s;
+}
+
+static J *jvalue(void)
+{
+    jws();
+    if (*jp == '{' || *jp == '[') {
+        int obj = *jp == '{';
+        J *j = jnew(obj ? J_OBJ : J_ARR);
+        jp++;
+        for (;;) {
+            jws();
+            if (*jp == (obj ? '}' : ']')) { jp++; break; }
+            if (*jp == ',') { jp++; continue; }
+            j->items = realloc(j->items, sizeof(J *) * (size_t)(j->n + 1));
+            if (obj) {
+                j->keys = realloc(j->keys, sizeof(char *) * (size_t)(j->n + 1));
+                j->keys[j->n] = jstring();
+                jws(); if (*jp == ':') jp++;
+            }
+            j->items[j->n++] = jvalue();
+        }
+        return j;
+    }
+    if (*jp == '"') { J *j = jnew(J_STR); j->str = jstring(); return j; }
+    if (!strncmp(jp, "true", 4)) { jp += 4; J *j = jnew(J_BOOL); j->num = 1; return j; }
+    if (!strncmp(jp, "false", 5)) { jp += 5; return jnew(J_BOOL); }
+    if (!strncmp(jp, "null", 4)) { jp += 4; return jnew(J_NULL); }
+    J *j = jnew(J_NUM);
+    char *end;
+    j->num = strtod(jp, &end);
+    jp = end;
+    return j;
+}
+
+static J *jget(const J *o, const char *key)
+{
+    if (!o || o->type != J_OBJ) return NULL;
+    for (int i = 0; i < o->n; i++) if (!strcmp(o->keys[i], key)) return o->items[i];
+    return NULL;
+}
+static double jnum(const J *o, const char *key, double fallback)
+{
+    const J *v = jget(o, key);
+    return v && (v->type == J_NUM || v->type == J_BOOL) ? v->num : fallback;
+}
+
+/* ----------------------------------------------------------------- map */
+
+enum { UP, DOWN, LEFT, RIGHT };
+static const uint32_t dir_key[4] = { BD_VK_UP, BD_VK_DOWN, BD_VK_LEFT, BD_VK_RIGHT };
+static const char *dir_name[4] = { "up", "down", "left", "right" };
 
 typedef struct {
     int x, y, w, h;
-    int luma; /* mean Y of the opaque pixels */
-} Draw;
+    int next[4];          /* -1: the key leaves the selection alone */
+    char action[16];
+    int value;
+    uint32_t hash[3];     /* normal, selected, activated */
+} Button;
+
+typedef struct {
+    int playlist, def, n;
+    Button *b;
+} Page;
+
+typedef struct {
+    int film, first, loops, subs, npages, nchapters;
+    double chapters[512];
+    Page *pages;
+} Map;
+
+static int load_map(const char *path, Map *m)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *text = malloc((size_t)size + 1);
+    size_t got = fread(text, 1, (size_t)size, f);
+    text[got] = 0;
+    fclose(f);
+    jp = text;
+    J *root = jvalue();
+    m->film = (int)jnum(root, "filmPlaylist", 0);
+    m->first = (int)jnum(root, "firstPage", 0);
+    m->loops = (int)jnum(root, "loops", 1);
+    m->subs = (int)jnum(root, "filmSubtitles", 0);
+    J *ch = jget(root, "chapters");
+    m->nchapters = ch ? ch->n : 0;
+    for (int i = 0; i < m->nchapters && i < 512; i++) m->chapters[i] = ch->items[i]->num;
+    J *pages = jget(root, "pages");
+    if (!pages || pages->type != J_ARR) return 0;
+    m->npages = pages->n;
+    m->pages = calloc((size_t)m->npages, sizeof(Page));
+    for (int p = 0; p < m->npages; p++) {
+        J *pj = pages->items[p];
+        Page *pg = &m->pages[p];
+        pg->playlist = (int)jnum(pj, "playlist", 0);
+        pg->def = (int)jnum(pj, "defaultButton", 0);
+        J *bs = jget(pj, "buttons");
+        pg->n = bs ? bs->n : 0;
+        pg->b = calloc((size_t)pg->n, sizeof(Button));
+        for (int i = 0; i < pg->n; i++) {
+            J *bj = bs->items[i];
+            Button *b = &pg->b[i];
+            J *r = jget(bj, "rect");
+            b->x = (int)r->items[0]->num; b->y = (int)r->items[1]->num;
+            b->w = (int)r->items[2]->num; b->h = (int)r->items[3]->num;
+            const char *keys[4] = { "up", "down", "left", "right" };
+            for (int d = 0; d < 4; d++) b->next[d] = (int)jnum(bj, keys[d], -1);
+            J *a = jget(bj, "action");
+            snprintf(b->action, sizeof b->action, "%s", jget(a, "type")->str);
+            b->value = (int)jnum(a, "value", 0);
+            J *h = jget(bj, "stateHashes");
+            for (int s = 0; s < 3; s++) b->hash[s] = (uint32_t)h->items[s]->num;
+        }
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------- player state */
+
+#define MAX_DRAWS 65536
+typedef struct { int x, y, w, h; uint32_t hash; } Draw;
 
 typedef struct {
     int verbose;
-    int playlist, title, chapter;
-    int playlist_starts;
-    int pg_stream, pg_enabled;
+    int playlist, playlist_starts, title, chapter, pg_stream, pg_enabled;
     int ig_flushes;
     Draw draws[MAX_DRAWS];
     int ndraws;
 } Ctx;
 
-static int failures = 0;
+static Ctx c;
+static Map m;
+static BLURAY *bd;
+static int failures, passes;
 
 static void check(int ok, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static void check(int ok, const char *fmt, ...)
@@ -57,331 +208,396 @@ static void check(int ok, const char *fmt, ...)
     vprintf(fmt, ap);
     printf("\n");
     va_end(ap);
-    if (!ok) failures++;
-}
-
-/* ---- Overlay callback: record every IG draw with its brightness. */
-
-static int mean_luma(const BD_OVERLAY *ov)
-{
-    long sum = 0, n = 0, pixels = (long)ov->w * ov->h, done = 0;
-    const BD_PG_RLE_ELEM *e = ov->img;
-    if (!e || !ov->palette) return -1;
-    while (done < pixels) {
-        if (e->len == 0) { e++; continue; } /* end of line */
-        const BD_PG_PALETTE_ENTRY *p = &ov->palette[e->color];
-        if (p->T > 128) { sum += (long)p->Y * e->len; n += e->len; }
-        done += e->len;
-        e++;
-    }
-    return n ? (int)(sum / n) : -1;
+    if (ok) passes++; else failures++;
 }
 
 static void overlay_cb(void *handle, const BD_OVERLAY *ov)
 {
-    Ctx *c = handle;
+    (void)handle;
     if (!ov || ov->plane != BD_OVERLAY_IG) return;
-    switch (ov->cmd) {
-    case BD_OVERLAY_DRAW:
-        if (c->ndraws < MAX_DRAWS) {
-            Draw *d = &c->draws[c->ndraws++];
-            d->x = ov->x; d->y = ov->y; d->w = ov->w; d->h = ov->h;
-            d->luma = mean_luma(ov);
-            if (c->verbose) printf("      draw %4d,%4d %4dx%-4d luma %d\n", d->x, d->y, d->w, d->h, d->luma);
-        }
-        break;
-    case BD_OVERLAY_FLUSH:
-        c->ig_flushes++;
-        break;
-    default:
-        break;
+    if (ov->cmd == BD_OVERLAY_FLUSH) { c.ig_flushes++; return; }
+    /* A new menu (page change, loop restart) starts on a fresh plane. */
+    if (ov->cmd == BD_OVERLAY_INIT || ov->cmd == BD_OVERLAY_CLOSE) { c.ndraws = 0; c.ig_flushes = 0; return; }
+    if (ov->cmd != BD_OVERLAY_DRAW || c.ndraws >= MAX_DRAWS) return;
+    /* FNV-1a over the palette indices, row by row, as the encoder hashes. */
+    uint32_t h = 0x811C9DC5u;
+    long left = (long)ov->w * ov->h;
+    for (const BD_PG_RLE_ELEM *e = ov->img; e && left > 0; e++) {
+        for (unsigned k = 0; k < e->len; k++) { h = (h ^ (uint8_t)e->color) * 0x01000193u; }
+        left -= e->len;
     }
+    Draw *d = &c.draws[c.ndraws++];
+    d->x = ov->x; d->y = ov->y; d->w = ov->w; d->h = ov->h; d->hash = h;
+    if (c.verbose) printf("      draw %4d,%4d %4dx%-4d %08x\n", d->x, d->y, d->w, d->h, h);
 }
 
-/* ---- Button bookkeeping. */
-
-enum { NORMAL, SELECTED, ACTIVATED, UNKNOWN };
-static const char *state_name[] = { "normal", "selected", "activated", "unknown" };
-
-static int classify(int luma)
-{
-    if (luma < 0) return UNKNOWN;
-    if (luma < 100) return NORMAL;
-    if (luma < 200) return SELECTED;
-    return ACTIVATED;
-}
-
-typedef struct { int x, y, w, h; } Rect;
-
-static int rect_cmp(const void *a, const void *b)
-{
-    const Rect *p = a, *q = b;
-    return p->y != q->y ? p->y - q->y : p->x - q->x;
-}
-
-/* Distinct rectangles drawn since the log was cleared, top to bottom, left
- * to right: the page's buttons in id order for the demo layout. */
-static int page_buttons(const Ctx *c, Rect *out, int max)
-{
-    int n = 0;
-    for (int i = 0; i < c->ndraws; i++) {
-        int seen = 0;
-        for (int j = 0; j < n; j++)
-            if (out[j].x == c->draws[i].x && out[j].y == c->draws[i].y) seen = 1;
-        if (!seen && n < max) {
-            out[n].x = c->draws[i].x; out[n].y = c->draws[i].y;
-            out[n].w = c->draws[i].w; out[n].h = c->draws[i].h;
-            n++;
-        }
-    }
-    qsort(out, n, sizeof(Rect), rect_cmp);
-    return n;
-}
-
-/* Latest state drawn at a rectangle since the log was cleared. */
-static int state_at(const Ctx *c, Rect r)
-{
-    for (int i = c->ndraws - 1; i >= 0; i--)
-        if (c->draws[i].x == r.x && c->draws[i].y == r.y) return classify(c->draws[i].luma);
-    return UNKNOWN;
-}
-
-static void clear_log(Ctx *c) { c->ndraws = 0; c->ig_flushes = 0; }
-
-/* ---- Event pump. */
-
-static void handle_event(Ctx *c, const BD_EVENT *ev)
+static void handle_event(const BD_EVENT *ev)
 {
     switch (ev->event) {
-    case BD_EVENT_PLAYLIST:          c->playlist = ev->param; c->playlist_starts++; break;
-    case BD_EVENT_TITLE:             c->title = ev->param; break;
-    case BD_EVENT_CHAPTER:           c->chapter = ev->param; break;
-    case BD_EVENT_PG_TEXTST_STREAM:  c->pg_stream = ev->param; break;
-    case BD_EVENT_PG_TEXTST:         c->pg_enabled = ev->param; break;
+    case BD_EVENT_PLAYLIST:         c.playlist = (int)ev->param; c.playlist_starts++; break;
+    case BD_EVENT_TITLE:            c.title = (int)ev->param; break;
+    case BD_EVENT_CHAPTER:          c.chapter = (int)ev->param; break;
+    case BD_EVENT_PG_TEXTST_STREAM: c.pg_stream = (int)ev->param; break;
+    case BD_EVENT_PG_TEXTST:        c.pg_enabled = (int)ev->param; break;
     default: break;
     }
-    if (c->verbose && ev->event != BD_EVENT_NONE)
+    if (c.verbose && ev->event != BD_EVENT_NONE)
         printf("    event %-22s %u\n", bd_event_name(ev->event), ev->param);
 }
 
-static void drain_events(BLURAY *bd, Ctx *c)
+static void drain(void)
 {
     BD_EVENT ev;
-    while (bd_get_event(bd, &ev)) handle_event(c, &ev);
+    while (bd_get_event(bd, &ev)) handle_event(&ev);
 }
 
-typedef int (*cond_f)(const Ctx *, int arg);
+typedef int (*cond_f)(int arg);
 
 /* Reads the stream until cond holds or max_blocks aligned units pass. */
-static int pump(BLURAY *bd, Ctx *c, int max_blocks, cond_f cond, int arg)
+static int pump(int max_blocks, cond_f cond, int arg)
 {
     static unsigned char buf[6144];
-    drain_events(bd, c);
+    drain();
     for (int i = 0; i < max_blocks; i++) {
-        if (cond(c, arg)) return 1;
+        if (cond && cond(arg)) return 1;
         BD_EVENT ev;
-        int r = bd_read_ext(bd, buf, sizeof buf, &ev);
-        if (r < 0) { if (c->verbose) printf("    read error\n"); return 0; }
-        handle_event(c, &ev);
-        drain_events(bd, c);
+        if (bd_read_ext(bd, buf, sizeof buf, &ev) < 0) return 0;
+        handle_event(&ev);
+        drain();
     }
-    return cond(c, arg);
+    return cond ? cond(arg) : 1;
 }
 
-static int menu_drawn(const Ctx *c, int playlist)
-{
-    return c->playlist == playlist && c->ig_flushes > 0 && c->ndraws > 0;
-}
-static int on_playlist(const Ctx *c, int playlist) { return c->playlist == playlist; }
-static int looped(const Ctx *c, int starts) { return c->playlist_starts > starts && c->ig_flushes > 0; }
-static int on_chapter(const Ctx *c, int chapter) { return c->playlist == FILM_PLAYLIST && c->chapter == chapter; }
+static void clear_log(void) { c.ndraws = 0; c.ig_flushes = 0; }
 
-static void key(BLURAY *bd, Ctx *c, uint32_t k, const char *name)
+static void key(uint32_t k, const char *name)
 {
-    if (c->verbose) printf("  key %s\n", name);
+    if (c.verbose) printf("  key %s\n", name);
     bd_user_input(bd, -1, k);
-    drain_events(bd, c);
+    drain();
 }
 
-/* Opens the menu page shown after Top Menu and returns its buttons. */
-static int top_menu(BLURAY *bd, Ctx *c, Rect *buttons, int max)
+enum { NORMAL, SELECTED, ACTIVATED, UNKNOWN, NOT_DRAWN };
+
+/* State of a button from its latest draw since the log was cleared. */
+static int state_of(const Page *pg, int b)
 {
-    clear_log(c);
-    c->playlist = -1;
-    if (c->verbose) printf("  Top Menu\n");
+    const Button *bt = &pg->b[b];
+    for (int i = c.ndraws - 1; i >= 0; i--) {
+        const Draw *d = &c.draws[i];
+        if (d->x != bt->x || d->y != bt->y) continue;
+        int match = -1, count = 0;
+        for (int s = 0; s < 3; s++) if (d->hash == bt->hash[s]) { match = s; count++; }
+        return count == 1 ? match : (count > 1 && match == NORMAL ? NORMAL : UNKNOWN);
+    }
+    return NOT_DRAWN;
+}
+
+/* The one button drawn as selected; -1 for none, -2 for several. */
+static int selected(const Page *pg)
+{
+    int found = -1;
+    for (int b = 0; b < pg->n; b++) {
+        if (state_of(pg, b) == SELECTED) { if (found >= 0) return -2; found = b; }
+    }
+    return found;
+}
+
+/* Buttons of the page that have been drawn, and draws that aren't buttons. */
+static int drawn_buttons(const Page *pg, int *strays)
+{
+    int n = 0;
+    for (int b = 0; b < pg->n; b++) if (state_of(pg, b) != NOT_DRAWN) n++;
+    *strays = 0;
+    for (int i = 0; i < c.ndraws; i++) {
+        int hit = 0;
+        for (int b = 0; b < pg->n; b++) if (c.draws[i].x == pg->b[b].x && c.draws[i].y == pg->b[b].y) hit = 1;
+        if (!hit) (*strays)++;
+    }
+    return n;
+}
+
+static int g_wait_page;
+static int page_ready(int starts)
+{
+    const Page *pg = &m.pages[g_wait_page];
+    int strays;
+    return c.playlist_starts > starts && c.playlist == pg->playlist && c.ig_flushes > 0
+        && drawn_buttons(pg, &strays) == pg->n;
+}
+static int film_started(int starts) { return c.playlist_starts > starts && c.playlist == m.film; }
+static int on_chapter(int ch) { return c.playlist == m.film && c.chapter == ch; }
+static int new_playlist(int starts) { return c.playlist_starts > starts; }
+static int never(int arg) { (void)arg; return 0; }
+
+/* Waits after an action for page p to open and draw. */
+static int wait_page(int p, int starts)
+{
+    g_wait_page = p;
+    return pump(6000, page_ready, starts);
+}
+
+/* ------------------------------------------------------- navigation */
+
+/* Presses keys along the map's edges until button target is selected. */
+static int select_button(const Page *pg, int target)
+{
+    for (int guard = 0; guard < 64; guard++) {
+        int cur = selected(pg);
+        if (cur == target) return 1;
+        if (cur < 0) return 0;
+        /* Breadth-first search for the first key towards the target. */
+        int prev_dir[256], prev[256], queue[256], qh = 0, qt = 0;
+        for (int i = 0; i < pg->n; i++) prev[i] = -2;
+        prev[cur] = -1; queue[qt++] = cur;
+        while (qh < qt && prev[target] == -2) {
+            int u = queue[qh++];
+            for (int d = 0; d < 4; d++) {
+                int v = pg->b[u].next[d];
+                if (v >= 0 && v < pg->n && prev[v] == -2) { prev[v] = u; prev_dir[v] = d; queue[qt++] = v; }
+            }
+        }
+        if (prev[target] == -2) return 0;
+        int v = target;
+        while (prev[v] != cur) v = prev[v];
+        key(dir_key[prev_dir[v]], dir_name[prev_dir[v]]);
+    }
+    return 0;
+}
+
+/* Page path from the first page: hop[i] = (page, button) pairs. */
+static int page_path(int target, int *hop_page, int *hop_button)
+{
+    int prev[256], prev_btn[256], queue[256], qh = 0, qt = 0;
+    for (int i = 0; i < m.npages; i++) prev[i] = -2;
+    prev[m.first] = -1; queue[qt++] = m.first;
+    while (qh < qt) {
+        int u = queue[qh++];
+        for (int b = 0; b < m.pages[u].n; b++) {
+            const Button *bt = &m.pages[u].b[b];
+            if (strcmp(bt->action, "goToPage") || bt->value < 0 || bt->value >= m.npages) continue;
+            if (prev[bt->value] == -2) { prev[bt->value] = u; prev_btn[bt->value] = b; queue[qt++] = bt->value; }
+        }
+    }
+    if (prev[target] == -2) return -1;
+    int n = 0, v = target;
+    while (prev[v] >= 0) { hop_page[n] = prev[v]; hop_button[n] = prev_btn[v]; n++; v = prev[v]; }
+    for (int i = 0; i < n / 2; i++) {   /* reverse into path order */
+        int t = hop_page[i]; hop_page[i] = hop_page[n - 1 - i]; hop_page[n - 1 - i] = t;
+        t = hop_button[i]; hop_button[i] = hop_button[n - 1 - i]; hop_button[n - 1 - i] = t;
+    }
+    return n;
+}
+
+/* Top Menu, then through goToPage buttons to page p. */
+static int open_page(int p)
+{
+    int starts = c.playlist_starts;
+    clear_log();
+    if (c.verbose) printf("  Top Menu\n");
     bd_menu_call(bd, -1);
-    if (!pump(bd, c, 4000, menu_drawn, MENU_PLAYLIST)) return 0;
-    return page_buttons(c, buttons, max);
+    if (!wait_page(m.first, starts)) return 0;
+    int hp[256], hb[256];
+    int hops = page_path(p, hp, hb);
+    if (hops < 0) return 0;
+    for (int i = 0; i < hops; i++) {
+        const Page *pg = &m.pages[hp[i]];
+        if (!select_button(pg, hb[i])) return 0;
+        starts = c.playlist_starts;
+        clear_log();
+        key(BD_VK_ENTER, "ENTER");
+        int next = i + 1 < hops ? hp[i + 1] : p;
+        if (!wait_page(next, starts)) return 0;
+    }
+    return 1;
+}
+
+/* Finds a playFilm button: its page and index. */
+static int find_play(int *page, int *button)
+{
+    for (int p = 0; p < m.npages; p++)
+        for (int b = 0; b < m.pages[p].n; b++)
+            if (!strcmp(m.pages[p].b[b].action, "playFilm")) { *page = p; *button = b; return 1; }
+    return 0;
+}
+
+/* ------------------------------------------------------------ checks */
+
+static void check_entry(int p, const char *how)
+{
+    const Page *pg = &m.pages[p];
+    int strays;
+    int n = drawn_buttons(pg, &strays);
+    int sel = selected(pg);
+    check(n == pg->n && strays == 0 && sel == pg->def,
+          "page %d (%05d) %s: %d of %d buttons drawn%s, button %d selected (default %d)",
+          p + 1, pg->playlist, how, n, pg->n, strays ? ", plus stray draws" : "", sel, pg->def);
+}
+
+static void check_edges(int p)
+{
+    const Page *pg = &m.pages[p];
+    int ok = 0, total = 0;
+    for (int b = 0; b < pg->n; b++) {
+        for (int d = 0; d < 4; d++) {
+            total++;
+            if (!select_button(pg, b)) {
+                printf("      FAIL page %d: can't reach button %d along the map's edges\n", p + 1, b);
+                continue;
+            }
+            /* The log runs from page entry, so the latest draw of every
+             * button is known; a key that changes nothing draws nothing. */
+            int mark = c.ndraws;
+            key(dir_key[d], dir_name[d]);
+            int want = pg->b[b].next[d] >= 0 ? pg->b[b].next[d] : b;
+            int got = c.ndraws == mark ? b : selected(pg);
+            if (got == want) ok++;
+            else printf("      FAIL page %d: %s from button %d selected %d, map says %d\n",
+                        p + 1, dir_name[d], b, got, want);
+        }
+    }
+    check(ok == total, "page %d: %d of %d remote edges move the selection as mapped", p + 1, ok, total);
+}
+
+/* The selection survives a loop restart, or a still menu holds. */
+static void check_hold(int p)
+{
+    const Page *pg = &m.pages[p];
+    int target = -1;
+    for (int d = 0; d < 4 && target < 0; d++) {
+        int v = pg->b[pg->def].next[d];
+        if (v >= 0 && v != pg->def) target = v;
+    }
+    if (target < 0) target = pg->def;
+    select_button(pg, target);
+    int starts = c.playlist_starts;
+    clear_log();
+    if (m.loops) {
+        int ok = pump(60000, new_playlist, starts);
+        g_wait_page = p;
+        ok = ok && pump(6000, page_ready, starts);
+        check(ok && selected(pg) == target, "page %d: after the menu loops, button %d is still selected (got %d)",
+              p + 1, target, selected(pg));
+    } else {
+        pump(5000, never, 0);
+        check(c.playlist_starts == starts && c.ndraws == 0 && c.playlist == pg->playlist,
+              "page %d: the still menu holds", p + 1);
+    }
+    /* Leave the page with its full picture redrawn. */
+    open_page(p);
+}
+
+static void check_action(int p, int b)
+{
+    const Page *pg = &m.pages[p];
+    const Button *bt = &pg->b[b];
+    if (!open_page(p) || !select_button(pg, b)) {
+        check(0, "page %d button %d (%s): couldn't select it", p + 1, b, bt->action);
+        return;
+    }
+    int starts = c.playlist_starts;
+    clear_log();
+    c.chapter = -1;
+    key(BD_VK_ENTER, "ENTER");
+    int activated = state_of(pg, b) == ACTIVATED;
+
+    if (!strcmp(bt->action, "playFilm") || !strcmp(bt->action, "playChapter")) {
+        int ch = strcmp(bt->action, "playFilm") ? bt->value : 0;
+        int ok = pump(6000, film_started, starts);
+        ok = ok && pump(400, on_chapter, ch + 1);
+        double t = bd_tell_time(bd) / 90000.0;
+        double want = ch < m.nchapters ? m.chapters[ch] : 0;
+        check(activated && ok && c.title == 1 && t > want - 0.5 && t < want + 1.0,
+              "page %d button %d (%s%s): %s, title %d, playlist %05d, chapter %d at %.2f s (want chapter %d at %.2f s)",
+              p + 1, b, bt->action, ch ? "" : "", activated ? "drawn activated" : "NOT drawn activated",
+              c.title, c.playlist, c.chapter, t, ch + 1, want);
+    } else if (!strcmp(bt->action, "goToPage")) {
+        int q = bt->value;
+        int ok = q >= 0 && q < m.npages && wait_page(q, starts);
+        if (ok) check_entry(q, "from goToPage");
+        else check(0, "page %d button %d (goToPage %d): page %d didn't open", p + 1, b, q + 1, q + 1);
+    } else if (!strcmp(bt->action, "setSubtitles")) {
+        int on = bt->value;
+        pump(30, new_playlist, starts);
+        int stayed = c.playlist_starts == starts && c.playlist == pg->playlist && selected(pg) == b;
+        int fp, fb, ok = find_play(&fp, &fb) && open_page(fp) && select_button(&m.pages[fp], fb);
+        if (ok) {
+            starts = c.playlist_starts;
+            key(BD_VK_ENTER, "ENTER");
+            ok = pump(6000, film_started, starts);
+            pump(60, never, 0);
+        }
+        check(stayed && ok && c.pg_stream == 1 && c.pg_enabled == on,
+              "page %d button %d (setSubtitles %s): menu %s, then the film plays with subtitle stream %d %s",
+              p + 1, b, on ? "on" : "off", stayed ? "stays" : "DIDN'T STAY", c.pg_stream,
+              c.pg_enabled ? "shown" : "hidden");
+    } else {
+        check(0, "page %d button %d: unknown action %s", p + 1, b, bt->action);
+    }
 }
 
 int main(int argc, char **argv)
 {
-    const char *disc = NULL;
-    double chapters[64];
-    int nchapters = 0, subtitles = 0, still = 0;
-    Ctx c;
-    memset(&c, 0, sizeof c);
+    const char *disc = NULL, *map_path = NULL;
     c.playlist = c.title = c.chapter = -1;
-
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--verbose")) c.verbose = 1;
-        else if (!strcmp(argv[i], "--subtitles")) subtitles = 1;
-        else if (!strcmp(argv[i], "--still")) still = 1;
-        else if (!strcmp(argv[i], "--chapters") && i + 1 < argc) {
-            char *s = argv[++i];
-            while (*s && nchapters < 64) {
-                chapters[nchapters++] = strtod(s, &s);
-                if (*s == ',') s++;
-            }
-        } else disc = argv[i];
+        else if (!strcmp(argv[i], "--map") && i + 1 < argc) map_path = argv[++i];
+        else disc = argv[i];
     }
-    if (!disc || nchapters == 0) {
-        fprintf(stderr, "usage: menu_check DISC --chapters 0,20,40 [--subtitles] [--verbose]\n");
+    if (!disc || !map_path) {
+        fprintf(stderr, "usage: menu_check DISC --map NAME.menu.json [--verbose]\n");
+        return 2;
+    }
+    if (!load_map(map_path, &m) || m.npages == 0) {
+        fprintf(stderr, "can't read the menu map %s\n", map_path);
         return 2;
     }
     if (!c.verbose) bd_set_debug_mask(0);
 
-    BLURAY *bd = bd_open(disc, NULL);
+    bd = bd_open(disc, NULL);
     check(bd != NULL, "libbluray opens %s", disc);
     if (!bd) return 1;
     const BLURAY_DISC_INFO *info = bd_get_disc_info(bd);
     check(info && info->first_play_supported && info->top_menu_supported && info->num_hdmv_titles == 1,
           "index.bdmv has First Play, Top Menu and one HDMV title");
+    bd_register_overlay_proc(bd, NULL, overlay_cb);
 
-    bd_register_overlay_proc(bd, &c, overlay_cb);
-    int expect_main = subtitles ? 4 : 2;
-    int scene_tiles = nchapters < 8 ? nchapters : 8;
-    int expect_scene = scene_tiles + 1 + (nchapters > 8);
-    Rect main_btn[64], scene_btn[64];
-
-    /* 1. First Play opens the menu page with its buttons. */
+    /* First Play opens the first page. */
+    int starts = c.playlist_starts;
+    clear_log();
     check(bd_play(bd) > 0, "bd_play starts navigation");
-    int ok = pump(bd, &c, 4000, menu_drawn, MENU_PLAYLIST);
-    int n = ok ? page_buttons(&c, main_btn, 64) : 0;
-    check(ok && n == expect_main, "First Play shows menu playlist %05d with %d buttons (drew %d)",
-          MENU_PLAYLIST, expect_main, n);
-    if (n != expect_main) goto done;
-    check(state_at(&c, main_btn[0]) == SELECTED && state_at(&c, main_btn[1]) == NORMAL,
-          "Play is selected by default, Scenes is normal (%s, %s)",
-          state_name[state_at(&c, main_btn[0])], state_name[state_at(&c, main_btn[1])]);
-
-    /* 2. Down moves the selection. */
-    clear_log(&c);
-    key(bd, &c, BD_VK_DOWN, "DOWN");
-    check(state_at(&c, main_btn[1]) == SELECTED && state_at(&c, main_btn[0]) == NORMAL,
-          "DOWN selects Scenes and deselects Play (%s, %s)",
-          state_name[state_at(&c, main_btn[1])], state_name[state_at(&c, main_btn[0])]);
-    if (still) {
-        /* A still menu holds: reading on changes nothing and keeps the menu. */
-        int starts = c.playlist_starts;
-        clear_log(&c);
-        pump(bd, &c, 5000, looped, starts);
-        check(c.playlist_starts == starts && c.playlist == MENU_PLAYLIST && c.ndraws == 0,
-              "the still menu holds with Scenes selected");
-    } else {
-        /* The menu clip loops; the selection should survive the restart. */
-        int starts = c.playlist_starts;
-        clear_log(&c);
-        ok = pump(bd, &c, 40000, looped, starts);
-        check(ok && c.playlist == MENU_PLAYLIST && state_at(&c, main_btn[1]) == SELECTED
-                 && state_at(&c, main_btn[0]) == NORMAL,
-              "after the menu loops, Scenes is still selected (%s)", state_name[state_at(&c, main_btn[1])]);
+    if (!wait_page(m.first, starts)) {
+        check(0, "First Play opens page %d (playlist %05d)", m.first + 1, m.pages[m.first].playlist);
+        goto done;
     }
-    clear_log(&c);
-    key(bd, &c, BD_VK_RIGHT, "RIGHT");
-    check(c.ndraws == 0, "RIGHT with no button to the right leaves the selection alone");
-    key(bd, &c, BD_VK_UP, "UP");
-    check(state_at(&c, main_btn[0]) == SELECTED, "UP selects Play again");
+    check_entry(m.first, "on First Play");
+    check_hold(m.first);
 
-    /* 3. Play starts the film at the beginning. */
-    clear_log(&c);
-    key(bd, &c, BD_VK_ENTER, "ENTER");
-    int activated = state_at(&c, main_btn[0]) == ACTIVATED;
-    ok = pump(bd, &c, 4000, on_playlist, FILM_PLAYLIST);
-    uint64_t t = bd_tell_time(bd);
-    check(activated && ok && c.title == 1 && t < 90000,
-          "Play draws activated, starts title 1 = playlist %05d at %.2f s", FILM_PLAYLIST, t / 90000.0);
-    pump(bd, &c, 200, on_chapter, 1);
-    check(c.chapter == 1, "film starts in chapter 1");
-
-    /* 4. Top Menu during the film returns to the menu. */
-    pump(bd, &c, 300, on_playlist, -2); /* play a little of the film */
-    n = top_menu(bd, &c, main_btn, 64);
-    check(n == expect_main, "Top Menu during the film returns to playlist %05d with %d buttons", MENU_PLAYLIST, n);
-
-    /* 5. Scenes opens the chapter page. */
-    clear_log(&c);
-    key(bd, &c, BD_VK_DOWN, "DOWN");
-    key(bd, &c, BD_VK_ENTER, "ENTER");
-    clear_log(&c);
-    ok = pump(bd, &c, 4000, menu_drawn, MENU_PLAYLIST + 1);
-    n = ok ? page_buttons(&c, scene_btn, 64) : 0;
-    check(ok && n == expect_scene, "Scenes opens playlist %05d with %d buttons (drew %d)",
-          MENU_PLAYLIST + 1, expect_scene, n);
-
-    /* 6. Each chapter button starts the film at its chapter. */
-    for (int ch = 0; ch < scene_tiles && n == expect_scene; ch++) {
-        if (ch > 0) {
-            n = top_menu(bd, &c, main_btn, 64);
-            key(bd, &c, BD_VK_DOWN, "DOWN");
-            key(bd, &c, BD_VK_ENTER, "ENTER");
-            clear_log(&c);
-            n = pump(bd, &c, 4000, menu_drawn, MENU_PLAYLIST + 1) ? page_buttons(&c, scene_btn, 64) : 0;
-            if (n != expect_scene) { check(0, "Scenes page reopens"); break; }
-        }
-        /* Chapter buttons sit in rows of four; chapter 1 starts selected. */
-        clear_log(&c);
-        for (int r = 0; r < ch / 4; r++) key(bd, &c, BD_VK_DOWN, "DOWN");
-        for (int k = 0; k < ch % 4; k++) key(bd, &c, BD_VK_RIGHT, "RIGHT");
-        int sel = ch == 0 || state_at(&c, scene_btn[ch]) == SELECTED;
-        clear_log(&c);
-        c.chapter = -1;
-        key(bd, &c, BD_VK_ENTER, "ENTER");
-        ok = pump(bd, &c, 4000, on_chapter, ch + 1);
-        t = bd_tell_time(bd);
-        double want = chapters[ch];
-        check(sel && ok && t / 90000.0 > want - 0.5 && t / 90000.0 < want + 1.0,
-              "Chapter %d button %s, starts playlist %05d in chapter %d at %.2f s (chapter at %.2f s)",
-              ch + 1, sel ? "selected" : "NOT selected", c.playlist, c.chapter, t / 90000.0, want);
+    /* Top Menu from the film returns to the first page. */
+    int fp, fb;
+    if (find_play(&fp, &fb) && open_page(fp) && select_button(&m.pages[fp], fb)) {
+        starts = c.playlist_starts;
+        key(BD_VK_ENTER, "ENTER");
+        pump(6000, film_started, starts);
+        pump(300, never, 0);
+        starts = c.playlist_starts;
+        clear_log();
+        bd_menu_call(bd, -1);
+        int ok = wait_page(m.first, starts);
+        check(ok, "Top Menu during the film returns to page %d", m.first + 1);
+        if (ok) check_entry(m.first, "from Top Menu");
     }
 
-    /* 7. Back returns to the main page. */
-    n = top_menu(bd, &c, main_btn, 64);
-    key(bd, &c, BD_VK_DOWN, "DOWN");
-    key(bd, &c, BD_VK_ENTER, "ENTER");
-    clear_log(&c);
-    if (pump(bd, &c, 4000, menu_drawn, MENU_PLAYLIST + 1)) {
-        page_buttons(&c, scene_btn, 64);
-        /* Back is the first button below the chapter rows. */
-        for (int r = 0; r < (scene_tiles + 3) / 4; r++) key(bd, &c, BD_VK_DOWN, "DOWN");
-        clear_log(&c);
-        key(bd, &c, BD_VK_ENTER, "ENTER");
-        ok = pump(bd, &c, 4000, menu_drawn, MENU_PLAYLIST);
-        check(ok, "Back on the Scenes page returns to playlist %05d", MENU_PLAYLIST);
-    }
-
-    /* 8. Subtitles On / Off decide whether the film shows subtitle stream 1. */
-    if (subtitles) {
-        for (int on = 1; on >= 0; on--) {
-            n = top_menu(bd, &c, main_btn, 64);
-            int steps = on ? 2 : 3;
-            for (int s = 0; s < steps; s++) key(bd, &c, BD_VK_DOWN, "DOWN");
-            clear_log(&c);
-            key(bd, &c, BD_VK_ENTER, "ENTER");
-            pump(bd, &c, 20, on_playlist, -2);
-            int stayed = c.playlist == MENU_PLAYLIST && state_at(&c, main_btn[steps]) == SELECTED;
-            for (int s = 0; s < steps; s++) key(bd, &c, BD_VK_UP, "UP");
-            key(bd, &c, BD_VK_ENTER, "ENTER");
-            ok = pump(bd, &c, 4000, on_playlist, FILM_PLAYLIST);
-            pump(bd, &c, 50, on_playlist, -2);
-            check(stayed && ok && c.pg_stream == 1 && c.pg_enabled == on,
-                  "Subtitles %s keeps the menu up, then the film plays with subtitle stream %d %s",
-                  on ? "On" : "Off", c.pg_stream, c.pg_enabled ? "shown" : "hidden");
-        }
+    for (int p = 0; p < m.npages; p++) {
+        if (!open_page(p)) { check(0, "page %d can't be reached from the first page", p + 1); continue; }
+        if (p != m.first) check_entry(p, "via its goToPage path");
+        check_edges(p);
+        for (int b = 0; b < m.pages[p].n; b++) check_action(p, b);
     }
 
 done:
     bd_close(bd);
-    printf("%s: %d check(s) failed\n", failures ? "FAILED" : "ALL PASSED", failures);
+    printf("%s: %d passed, %d failed\n", failures ? "FAILED" : "ALL PASSED", passes, failures);
     return failures ? 1 : 0;
 }
