@@ -8,9 +8,12 @@ enum HeadlessCLI {
            [--disc bd25|bd50] [--standard auto|1080p23.976|1080p24|1080i29.97|1080i25|720p59.94|720p50|720p23.976|720p24]
            [--audio auto|N|mono5.1|mono5.1-film|monostereo|silence] [--audio-kbps 448|640]
            [--one-pass] [--chapters none|5|10|"00:00,05:30"] [--srt FILE] [--srt-lang eng]
-           [--menu-demo] [--plan-only]
+           [--menu-demo [--menu-loop SECONDS]] [--plan-only]
+           --headless --iso-from BDMV_FOLDER --output FILE.iso [--label NAME]
 
-    --menu-demo adds a generated menu (Play, Scenes, Subtitles) to BDMV output.
+    --menu-demo adds a generated menu (Play, Scenes, Subtitles) to the disc;
+    --menu-loop 0 makes it a still menu instead of a 30 s loop.
+    --iso-from writes an existing BDMV folder as a UDF 2.50 disc image.
     """
 
     static func run(_ args: [String]) async -> Int32 {
@@ -19,7 +22,7 @@ enum HeadlessCLI {
         var i = 0
         while i < args.count {
             let a = args[i]
-            if ["--headless", "--one-pass", "--plan-only", "--menu-demo"].contains(a) {
+            if ["--headless", "--one-pass", "--plan-only", "--menu-demo", "--constant-iso-hdr"].contains(a) {
                 flags.insert(a)
             } else if a.hasPrefix("--"), i + 1 < args.count {
                 opts[a] = args[i + 1]
@@ -28,6 +31,20 @@ enum HeadlessCLI {
                 return fail("unexpected argument \(a)\n\(usage)", code: 2)
             }
             i += 1
+        }
+        if let folder = opts["--iso-from"] {
+            guard let out = opts["--output"] else { return fail(usage, code: 2) }
+            let source = URL(fileURLWithPath: folder)
+            do {
+                try UDFImageWriter.writeImage(
+                    of: source, to: URL(fileURLWithPath: out),
+                    label: opts["--label"] ?? BDMVAuthor.discLabel(for: source.lastPathComponent),
+                    header: flags.contains("--constant-iso-hdr") ? .reproducible : .normal())
+                print("output: \(out)")
+                return 0
+            } catch {
+                return fail(error.localizedDescription)
+            }
         }
         guard let inputPath = opts["--input"] else { return fail(usage, code: 2) }
         let input = URL(fileURLWithPath: inputPath)
@@ -100,6 +117,10 @@ enum HeadlessCLI {
                 title: input.deletingPathExtension().lastPathComponent,
                 chapterTimes: settings.chapters.chapterTimes(duration: info.duration),
                 subtitles: request.subtitle != nil)
+            if let loop = opts["--menu-loop"] {
+                guard let seconds = Double(loop) else { return fail("--menu-loop takes seconds", code: 2) }
+                request.menu?.loopSeconds = seconds
+            }
         }
         let plan = EncodePlan.make(request, capabilities: caps)
         print("source: \(info.width)x\(info.height) \(VideoStandard.formatRate(info.frameRate)) fps\(info.sourceIsInterlaced ? " interlaced" : "") \(info.videoCodec) \(formatDuration(info.duration))")
