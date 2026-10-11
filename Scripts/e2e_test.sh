@@ -23,7 +23,16 @@ WORK="$(mktemp -d -t disc-e2e)"
 MOUNTS_FILE="$WORK/mounts"
 cleanup() {
     if [ -f "$MOUNTS_FILE" ]; then
-        while IFS= read -r m; do hdiutil detach -quiet "$m" 2>/dev/null || true; done < "$MOUNTS_FILE"
+        # A just-mounted volume can be busy for a moment (Spotlight, a
+        # reader finishing); retry, then force so no image is left mounted.
+        while IFS= read -r m; do
+            [ -d "$m" ] || continue
+            for _ in 1 2 3 4 5; do
+                hdiutil detach -quiet "$m" 2>/dev/null && break
+                sleep 1
+            done
+            [ -d "$m" ] && hdiutil detach -quiet -force "$m" 2>/dev/null || true
+        done < "$MOUNTS_FILE"
     fi
     rm -rf "$WORK"
 }
