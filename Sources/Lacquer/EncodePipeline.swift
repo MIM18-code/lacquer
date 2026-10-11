@@ -9,6 +9,8 @@ struct EncodeRequest: Sendable {
     var audio: AudioSource
     var subtitle: URL?
     var subtitleLanguage: String = "eng"
+    /// On-screen menu for BDMV output. nil: the disc auto-plays the film.
+    var menu: DiscMenu?
 
     init(job: EncodeJob, settings: EncodeSettings) {
         self.input = job.inputURL
@@ -80,7 +82,12 @@ struct EncodePlan: Equatable, Sendable {
         )
         // ~3% transport-stream overhead on top of the elementary streams.
         let bytes = Int64(Double(vBitrate + audioBps) * info.duration / 8 * 1.03)
+        // Chapter marks on frame starts, where the video encode puts IDR
+        // frames, so a chapter (from Next or a menu) starts exactly on it
+        // instead of at the GOP before.
         let chapters = settings.chapters.chapterTimes(duration: info.duration)
+            .map { req.standard.frameStart(nearest: $0) }
+            .reduce(into: [Double]()) { if $0.last != $1 { $0.append($1) } }
 
         var warnings: [PlanWarning] = []
         let checksDisc = settings.outputMode != .m2tsOnly
@@ -119,6 +126,15 @@ struct EncodePlan: Equatable, Sendable {
             }
         case .discrete:
             break
+        }
+        if req.menu != nil {
+            switch settings.outputMode {
+            case .bdmvFolder: break
+            case .iso:
+                warnings.append(PlanWarning(level: .blocking, text: "Disc menus need BDMV Folder output for now. Make a folder and burn it with Toast or hdiutil."))
+            case .m2tsOnly:
+                warnings.append(PlanWarning(level: .info, text: "M2TS output has no menus. Author them in Toast, or choose BDMV Folder."))
+            }
         }
         if !chapters.isEmpty && settings.outputMode == .m2tsOnly {
             warnings.append(PlanWarning(level: .info, text: "Chapters live in the disc playlist, which M2TS output doesn't have. Add them in Toast."))
@@ -372,7 +388,7 @@ struct EncodePipeline {
                 input: req.input, videoOut: videoOut, workDir: workDir,
                 bitrate: plan.videoBitrate, standard: req.standard,
                 source: info, capabilities: capabilities,
-                twoPass: settings.twoPass, logger: log,
+                twoPass: settings.twoPass, keyframes: plan.chapterTimes, logger: log,
                 progress: { frac in onStage(.encodingVideo, frac * 0.80) }
             )
         } catch {
@@ -416,6 +432,11 @@ struct EncodePipeline {
                     videoWidth: req.standard.width, videoHeight: req.standard.height,
                     outputFolder: target, chapters: plan.chapterTimes,
                     subtitle: subtitleTrack, languageCode: lang, logger: log)
+                if let menu = req.menu {
+                    log.section("DISC MENU")
+                    try await HDMVMenuAuthor(ffmpeg: tools.ffmpeg)
+                        .author(menu, disc: target, workDir: workDir, logger: log, onLog: onLog)
+                }
             case .iso:
                 try await author.authorISO(
                     videoH264: videoOut, audioAC3: audioOut,
