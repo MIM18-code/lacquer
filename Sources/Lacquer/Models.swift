@@ -179,6 +179,11 @@ enum VideoStandard: String, CaseIterable, Identifiable, Codable, Sendable {
         }
         let suggestion = Self.suggested(forFrameRate: fps, interlaced: sourceInterlaced)
         let hint = suggestion == self ? "" : " Use \(suggestion.shortName) instead."
+        // Below 10 or above 120 fps the source is a slideshow, a variable
+        // frame rate capture or a broken file; a percentage means nothing.
+        if fps < 10 || fps > 120 {
+            return .major("\(sourceLabel) is an unusual frame rate for a film master, so frames will be repeated or dropped to make \(targetLabel). Check the export settings.")
+        }
         if fps > target {
             let dropped = (1 - target / fps) * 100
             return .major("\(sourceLabel) source on \(targetLabel) drops about \(Int(dropped.rounded()))% of frames, so motion will stutter.\(hint)")
@@ -220,6 +225,15 @@ enum OutputMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case m2tsOnly   = "M2TS File Only (for Toast)"
 
     var id: String { rawValue }
+
+    /// How a job row names its output: "BDMV folder", "ISO image", "M2TS file".
+    var rowName: String {
+        switch self {
+        case .bdmvFolder: return "BDMV folder"
+        case .iso:        return "ISO image"
+        case .m2tsOnly:   return "M2TS file"
+        }
+    }
 
     var shortName: String {
         switch self {
@@ -581,6 +595,9 @@ struct EncodeJob: Identifiable, Equatable, Sendable {
     var progress: Double = 0
     var startedAt: Date?
     var errorMessage: String?
+    /// The output kind the job was started with. Pending jobs follow the
+    /// sidebar; once a job starts, this is what it actually writes.
+    var startedOutputMode: OutputMode?
     /// Set when the job finishes or fails after writing a log.
     var outputURL: URL?
     var logURL: URL?

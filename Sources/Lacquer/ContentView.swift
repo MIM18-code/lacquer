@@ -50,11 +50,6 @@ struct ContentView: View {
         .navigationSubtitle(subtitle)
         .toolbar { toolbar }
         .onAppear { coordinator.loadTools() }
-        .onChange(of: coordinator.requestAddFiles) { requested in
-            guard requested else { return }
-            coordinator.requestAddFiles = false
-            pickFiles()
-        }
         .alert(coordinator.errorTitle, isPresented: .init(
             get: { coordinator.errorMessage != nil },
             set: { if !$0 { coordinator.errorMessage = nil } }
@@ -261,17 +256,7 @@ struct ContentView: View {
     }
 
     private func pickFiles() {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.movie, .quickTimeMovie, .mpeg4Movie, .folder]
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = true
-        panel.prompt = "Add"
-        if panel.runModal() == .OK {
-            let urls = panel.urls
-            Task { @MainActor in
-                await coordinator.loadInputs(urls)
-            }
-        }
+        coordinator.chooseAndAddFiles()
     }
 
     private func attachSubtitle(to job: EncodeJob) {
@@ -686,7 +671,7 @@ struct JobRow: View {
             Image(systemName: "arrow.right")
                 .imageScale(.small)
                 .accessibilityLabel("becomes")
-            Text(standard.shortName)
+            Text("\(standard.shortName), \((job.startedOutputMode ?? settings.outputMode).rowName)")
                 .foregroundStyle(.primary)
         }
         .font(.callout)

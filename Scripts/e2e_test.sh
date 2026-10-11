@@ -18,9 +18,13 @@ FP="$DISC_TOOLS_DIR/ffprobe"
 [ -x "$FF" ] || { echo "no tools in $DISC_TOOLS_DIR; run packaging/prepare_runtime.py" >&2; exit 1; }
 
 WORK="$(mktemp -d -t disc-e2e)"
-MOUNTS=()
+# mount_iso runs inside $(...), so a shell array wouldn't survive; keep the
+# mount points in a file the EXIT trap can read.
+MOUNTS_FILE="$WORK/mounts"
 cleanup() {
-    for m in ${MOUNTS[@]+"${MOUNTS[@]}"}; do hdiutil detach -quiet "$m" 2>/dev/null || true; done
+    if [ -f "$MOUNTS_FILE" ]; then
+        while IFS= read -r m; do hdiutil detach -quiet "$m" 2>/dev/null || true; done < "$MOUNTS_FILE"
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -35,7 +39,7 @@ probe() {  # probe <file> <stream selector> <entry>
 mount_iso() {
     local m
     m="$(hdiutil attach -nobrowse -readonly "$1" | tail -1 | awk -F'\t' '{print $NF}')"
-    MOUNTS+=("$m")
+    echo "$m" >> "$MOUNTS_FILE"
     echo "$m"
 }
 
