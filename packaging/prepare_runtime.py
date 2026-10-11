@@ -42,7 +42,7 @@ RUNTIME = VENDOR / 'runtime'
 # autotools and FFmpeg's configure break on spaces in paths, and this repo lives
 # in a folder with spaces, so the build tree sits in a space-free cache folder.
 # Override with RUNTIME_BUILD_DIR. Logs are copied back to vendor/build-logs/.
-BUILD = Path(os.environ.get('RUNTIME_BUILD_DIR') or (Path.home() / 'Library/Caches/bluray-compressor-runtime-build'))
+BUILD = Path(os.environ.get('RUNTIME_BUILD_DIR') or (Path.home() / 'Library/Caches/lacquer-runtime-build'))
 PREFIX = BUILD / 'prefix'
 LOGS = BUILD / 'logs'
 
@@ -104,7 +104,7 @@ def fetch(entry):
     if not path.exists():
         say('downloading %s' % entry['url'])
         tmp = path.with_name(path.name + '.download')
-        req = urllib.request.Request(entry['url'], headers={'User-Agent': 'bluray-compressor-build'})
+        req = urllib.request.Request(entry['url'], headers={'User-Agent': 'lacquer-build'})
         with urllib.request.urlopen(req, timeout=120) as src, open(tmp, 'wb') as dst:
             shutil.copyfileobj(src, dst)
         got = sha256(tmp)

@@ -1,5 +1,5 @@
 import XCTest
-@testable import BluRayCompressor
+@testable import Lacquer
 
 final class StandardTests: XCTestCase {
     func testSuggestedStandardKeepsEveryFrame() {

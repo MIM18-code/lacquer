@@ -1,6 +1,6 @@
 import Foundation
 
-/// `BluRayCompressor --headless --input FILE [options]` runs one encode
+/// `Lacquer --headless --input FILE [options]` runs one encode
 /// without a window. Exit code 0 on success, 1 on failure, 2 on bad usage.
 enum HeadlessCLI {
     static let usage = """
