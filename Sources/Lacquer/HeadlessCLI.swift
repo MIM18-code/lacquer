@@ -8,7 +8,9 @@ enum HeadlessCLI {
            [--disc bd25|bd50] [--standard auto|1080p23.976|1080p24|1080i29.97|1080i25|720p59.94|720p50|720p23.976|720p24]
            [--audio auto|N|mono5.1|mono5.1-film|monostereo|silence] [--audio-kbps 448|640]
            [--one-pass] [--chapters none|5|10|"00:00,05:30"] [--srt FILE] [--srt-lang eng]
-           [--plan-only]
+           [--menu-demo] [--plan-only]
+
+    --menu-demo adds a generated menu (Play, Scenes, Subtitles) to BDMV output.
     """
 
     static func run(_ args: [String]) async -> Int32 {
@@ -17,7 +19,7 @@ enum HeadlessCLI {
         var i = 0
         while i < args.count {
             let a = args[i]
-            if ["--headless", "--one-pass", "--plan-only"].contains(a) {
+            if ["--headless", "--one-pass", "--plan-only", "--menu-demo"].contains(a) {
                 flags.insert(a)
             } else if a.hasPrefix("--"), i + 1 < args.count {
                 opts[a] = args[i + 1]
@@ -88,14 +90,23 @@ enum HeadlessCLI {
             audio = .stream(idx)
         }
 
-        let request = EncodeRequest(
+        var request = EncodeRequest(
             input: input, info: info, settings: settings, standard: standard, audio: audio,
             subtitle: opts["--srt"].map { URL(fileURLWithPath: $0) },
             subtitleLanguage: opts["--srt-lang"] ?? "eng"
         )
+        if flags.contains("--menu-demo") {
+            request.menu = MenuDemo.make(
+                title: input.deletingPathExtension().lastPathComponent,
+                chapterTimes: settings.chapters.chapterTimes(duration: info.duration),
+                subtitles: request.subtitle != nil)
+        }
         let plan = EncodePlan.make(request, capabilities: caps)
         print("source: \(info.width)x\(info.height) \(VideoStandard.formatRate(info.frameRate)) fps\(info.sourceIsInterlaced ? " interlaced" : "") \(info.videoCodec) \(formatDuration(info.duration))")
         print("plan: \(standard.shortName) · \(plan.videoBitrate / 1000) kbps video · \(info.label(for: audio)) → AC-3 \(plan.audioBitrateKbps) kbps · ~\(ByteCountFormatter.string(fromByteCount: plan.estimatedBytes, countStyle: .file))")
+        if let menu = request.menu {
+            print("menu: \(menu.pages.count) pages, \(menu.pages.map { "\($0.buttons.count)" }.joined(separator: "/")) buttons")
+        }
         for w in plan.warnings { print("warning[\(w.level)]: \(w.text)") }
         if flags.contains("--plan-only") { return plan.isBlocked ? 1 : 0 }
 

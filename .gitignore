@@ -9,3 +9,4 @@ build/
 *.zip
 packaging/vendor/
 packaging/dist/
+Scripts/menu-check/menu_check
