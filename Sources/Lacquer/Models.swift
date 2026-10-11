@@ -598,6 +598,8 @@ struct EncodeJob: Identifiable, Equatable, Sendable {
     /// The output kind the job was started with. Pending jobs follow the
     /// sidebar; once a job starts, this is what it actually writes.
     var startedOutputMode: OutputMode?
+    /// The video standard the job was started with, for the same reason.
+    var startedStandard: VideoStandard?
     /// Set when the job finishes or fails after writing a log.
     var outputURL: URL?
     var logURL: URL?
@@ -610,7 +612,8 @@ struct EncodeJob: Identifiable, Equatable, Sendable {
     }
 
     func standard(with settings: EncodeSettings) -> VideoStandard {
-        standardOverride
+        startedStandard
+            ?? standardOverride
             ?? settings.videoStandard
             ?? VideoStandard.suggested(forFrameRate: mediaInfo.frameRate,
                                        interlaced: mediaInfo.sourceIsInterlaced)

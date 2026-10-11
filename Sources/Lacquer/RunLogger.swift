@@ -36,6 +36,9 @@ final class RunLogger: @unchecked Sendable {
         self.handle = try? FileHandle(forWritingTo: url)
     }
 
+    /// False when the log file couldn't be opened for writing.
+    var isOpen: Bool { handle != nil }
+
     deinit {
         try? handle?.close()
     }

@@ -123,7 +123,8 @@ final class AudioTests: XCTestCase {
         let src = URL(fileURLWithPath: "/x.mov")
         let i = info((1...6).map { stream($0, ch: 1) })
         let smpte = BluRayEncoder.audioArguments(source: .discrete([1, 2, 3, 4, 5, 6], .smpte), input: src, info: i, bitrateKbps: 640)
-        XCTAssertTrue(smpte.contains("[0:1][0:2][0:3][0:4][0:5][0:6]join=inputs=6:channel_layout=5.1:map=0.0-FL|1.0-FR|2.0-FC|3.0-LFE|4.0-BL|5.0-BR[aout]"), "\(smpte)")
+        XCTAssertTrue(smpte.contains { $0.hasSuffix("[a0][a1][a2][a3][a4][a5]join=inputs=6:channel_layout=5.1:map=0.0-FL|1.0-FR|2.0-FC|3.0-LFE|4.0-BL|5.0-BR[aout]") }, "\(smpte)")
+        XCTAssertTrue(smpte.contains { $0.hasPrefix("[0:1]asetpts=PTS-STARTPTS[a0];[0:2]asetpts=PTS-STARTPTS[a1]") }, "\(smpte)")
         let film = BluRayEncoder.audioArguments(source: .discrete([1, 2, 3, 4, 5, 6], .film), input: src, info: i, bitrateKbps: 640)
         XCTAssertTrue(film.contains { $0.contains("0.0-FL|1.0-FC|2.0-FR|3.0-BL|4.0-BR|5.0-LFE") }, "\(film)")
     }
@@ -277,7 +278,22 @@ final class ReviewRegressionTests: XCTestCase {
                              audioStreams: streams, sourceIsInterlaced: false)
         let args = BluRayEncoder.audioArguments(source: .discrete([1, 2, 3, 4, 5, 6], .smpte),
                                                 input: URL(fileURLWithPath: "/x.mov"), info: info, bitrateKbps: 640)
-        XCTAssertTrue(args.contains { $0.hasSuffix("5.0-BR,adelay=delays=100:all=1[aout]") }, "\(args)")
+        XCTAssertTrue(args.contains { $0.contains("[0:1]adelay=delays=100:all=1,asetpts=PTS-STARTPTS[a0]") }, "\(args)")
+    }
+
+    func testEachMonoTrackKeepsItsOwnOffset() {
+        // Review #2: left starts at 0, right one second later. Each track
+        // gets its own alignment instead of the first track's.
+        var left = AudioStreamInfo(ffmpegIndex: 1, codec: "pcm", channels: 1, layout: "mono")
+        var right = AudioStreamInfo(ffmpegIndex: 2, codec: "pcm", channels: 1, layout: "mono")
+        left.startTime = 0
+        right.startTime = 1
+        let info = MediaInfo(duration: 3, width: 320, height: 180, videoCodec: "h264", frameRate: 24,
+                             audioStreams: [left, right], sourceIsInterlaced: false)
+        let args = BluRayEncoder.audioArguments(source: .discrete([1, 2], .smpte),
+                                                input: URL(fileURLWithPath: "/x.mov"), info: info, bitrateKbps: 448)
+        let graph = args[args.firstIndex(of: "-filter_complex")! + 1]
+        XCTAssertTrue(graph.hasPrefix("[0:1]asetpts=PTS-STARTPTS[a0];[0:2]adelay=delays=1000:all=1,asetpts=PTS-STARTPTS[a1];"), graph)
     }
 
     func testCoverArtIsNotTheFilm() throws {
@@ -306,5 +322,44 @@ final class ReviewRegressionTests: XCTestCase {
                         ["index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2]]
         ]
         XCTAssertThrowsError(try MediaProbe(ffprobe: URL(fileURLWithPath: "/ffprobe")).parse(onlyArt))
+    }
+}
+
+/// Defects from the second Codex review (reviews/codex-review-2-2026-10-11.md).
+final class SecondReviewTests: XCTestCase {
+    func testReservationGivesConcurrentRunsDifferentNames() throws {
+        // #1: two encodes of same-named masters into one folder.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("reserve-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = URL(fileURLWithPath: "/a/Film.mov")
+        let first = try OutputNaming.reserveBase(in: dir, for: input)
+        let second = try OutputNaming.reserveBase(in: dir, for: input)
+        XCTAssertEqual(first.lastPathComponent, "Film_BluRay")
+        XCTAssertEqual(second.lastPathComponent, "Film_BluRay_2")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: first.appendingPathExtension("log").path))
+    }
+
+    func testLongNamesFitTheFilenameLimit() {
+        // #9: a legal 247-character source name must leave room for every suffix.
+        let long = String(repeating: "x", count: 247)
+        let base = OutputNaming.uniqueBase(in: URL(fileURLWithPath: "/out"),
+                                           for: URL(fileURLWithPath: "/src/\(long).mov"), fileExists: { _ in false })
+        XCTAssertLessThanOrEqual((base.lastPathComponent + "_999.menu.json").utf8.count, 255)
+        // Multi-byte characters are cut whole.
+        let cut = OutputNaming.truncated(String(repeating: "é", count: 200), maxBytes: 101)
+        XCTAssertEqual(cut.utf8.count, 100)
+    }
+
+    func testStartedJobKeepsItsStandard() {
+        // #14: a running or finished row shows the format it was made with.
+        let info = MediaInfo(duration: 60, width: 1920, height: 1080, videoCodec: "prores", frameRate: 25,
+                             audioStreams: [], sourceIsInterlaced: false)
+        var job = EncodeJob(inputURL: URL(fileURLWithPath: "/a.mov"), mediaInfo: info)
+        var settings = EncodeSettings()
+        XCTAssertEqual(job.standard(with: settings), .i1080_25)
+        job.startedStandard = .i1080_25
+        settings.videoStandard = .p1080_24
+        XCTAssertEqual(job.standard(with: settings), .i1080_25)
     }
 }

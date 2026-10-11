@@ -198,11 +198,50 @@ enum OutputNaming {
         return s
     }
 
+    /// File names are limited to 255 bytes. Leave room for "_BluRay", a
+    /// "_999" counter and the longest extension a job writes (".menu.json").
+    static let baseByteBudget = 255 - "_BluRay_999".utf8.count - ".menu.json".utf8.count
+
+    /// Cuts a name to `maxBytes` of UTF-8 without splitting a character.
+    static func truncated(_ name: String, maxBytes: Int) -> String {
+        guard name.utf8.count > maxBytes else { return name }
+        var out = ""
+        for ch in name {
+            if out.utf8.count + String(ch).utf8.count > maxBytes { break }
+            out.append(ch)
+        }
+        return out.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Picks `<folder>/<input name>_BluRay` (numbered if taken) and claims it
+    /// by creating its log file exclusively, so two encodes running at the
+    /// same time can never pick the same output.
+    static func reserveBase(in folder: URL, for input: URL) throws -> URL {
+        let fm = FileManager.default
+        var excluded = Set<String>()
+        while true {
+            let base = uniqueBase(in: folder, for: input,
+                                  fileExists: { excluded.contains($0) || fm.fileExists(atPath: $0) })
+            let log = base.appendingPathExtension("log")
+            let fd = open(log.path, O_CREAT | O_EXCL | O_WRONLY, 0o644)
+            if fd >= 0 {
+                close(fd)
+                return base
+            }
+            if errno != EEXIST {
+                throw EncodePipeline.PipelineError.preflight(
+                    "Can't create \(log.lastPathComponent) in \(folder.path): \(String(cString: strerror(errno))).")
+            }
+            excluded.insert(log.path)
+        }
+    }
+
     /// `<folder>/<input name>_BluRay`, numbered if anything with that stem
     /// (folder, .iso, .m2ts or .log) already exists.
     static func uniqueBase(in folder: URL, for input: URL,
                            fileExists: (String) -> Bool = FileManager.default.fileExists(atPath:)) -> URL {
-        let stem = sanitizedBase(input.deletingPathExtension().lastPathComponent) + "_BluRay"
+        let stem = truncated(sanitizedBase(input.deletingPathExtension().lastPathComponent),
+                             maxBytes: baseByteBudget) + "_BluRay"
         var candidate = folder.appendingPathComponent(stem)
         var counter = 2
         func taken(_ url: URL) -> Bool {
@@ -308,9 +347,6 @@ struct EncodePipeline {
         guard Self.isWritable(folder) else {
             throw PipelineError.preflight("Can't write to \(folder.path). Choose another output folder in the sidebar.")
         }
-        let base = OutputNaming.uniqueBase(in: folder, for: req.input)
-        let target = OutputNaming.output(base: base, mode: settings.outputMode)
-
         // ---- Work folder on the output volume, so a long encode doesn't
         // fill the startup disk when the output goes to an external drive.
         let workDir: URL
@@ -332,9 +368,18 @@ struct EncodePipeline {
             try Self.requireSpace(plan.estimatedBytes + margin, at: folder, purpose: "the finished output")
         }
 
+        // Claim the output name last among the checks, so a failed check
+        // leaves no empty log behind.
+        let base = try OutputNaming.reserveBase(in: folder, for: req.input)
+        let target = OutputNaming.output(base: base, mode: settings.outputMode)
+
         // ---- Log ----
         let logURL = base.appendingPathExtension("log")
         let log = RunLogger(url: logURL)
+        guard log.isOpen else {
+            try? fm.removeItem(at: logURL)
+            throw PipelineError.preflight("Can't write the log \(logURL.lastPathComponent) in \(folder.path).")
+        }
         log.write("\(AppInfo.name) \(AppInfo.version) — \(req.input.lastPathComponent)")
         log.table("Inputs", [
             ("input", req.input.path),
