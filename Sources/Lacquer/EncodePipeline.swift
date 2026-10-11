@@ -437,7 +437,8 @@ struct EncodePipeline {
             log.section("MENU RENDER")
             let hdr = info.isHDR && capabilities.canTonemapHDR ? info.colorTransfer : nil
             do {
-                req.menu = try await MenuRenderer(ffmpeg: tools.ffmpeg, hdrTransfer: hdr)
+                req.menu = try await MenuRenderer(ffmpeg: tools.ffmpeg, hdrTransfer: hdr,
+                                                  deinterlace: info.sourceIsInterlaced)
                     .render(template: template, film: req.input, chapters: plan.chapterTimes,
                             hasSubtitles: req.subtitle != nil)
                 log.write("Rendered \(req.menu?.pages.count ?? 0) menu pages (\(template.style.displayName))")

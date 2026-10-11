@@ -304,7 +304,8 @@ struct MenuDesignerWindow: View {
                 chapters: coordinator.chapters(for: job),
                 ffmpeg: ffmpeg,
                 hasSubtitles: job.subtitleURL != nil,
-                hdrTransfer: info.isHDR && coordinator.capabilities.canTonemapHDR ? info.colorTransfer : nil
+                hdrTransfer: info.isHDR && coordinator.capabilities.canTonemapHDR ? info.colorTransfer : nil,
+                deinterlace: info.sourceIsInterlaced
             )
             .navigationTitle("Menu for \(job.inputURL.lastPathComponent)")
             .disabled(!job.status.isEditable)
