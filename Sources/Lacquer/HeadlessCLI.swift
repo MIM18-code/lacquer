@@ -15,7 +15,7 @@ enum HeadlessCLI {
     --menu designs a menu in one of the three styles, with a still from the
     film as the background, exactly as the app's menu designer would;
     --menu-demo adds a generated menu (Play, Scenes, Subtitles) to the disc;
-    --menu-loop 0 makes it a still menu instead of a 30 s loop.
+    --menu-loop 0 makes it a still menu instead of a 30 s loop (600 s at most).
     --iso-from writes an existing BDMV folder as a UDF 2.50 disc image.
     """
 
@@ -131,7 +131,10 @@ enum HeadlessCLI {
                 chapterTimes: settings.chapters.chapterTimes(duration: info.duration),
                 subtitles: request.subtitle != nil)
             if let loop = opts["--menu-loop"] {
-                guard let seconds = Double(loop) else { return fail("--menu-loop takes seconds", code: 2) }
+                guard let seconds = Double(loop), seconds.isFinite, seconds >= 0,
+                      seconds <= HDMVMenuAuthor.maxLoopSeconds else {
+                    return fail("--menu-loop takes 0 (a still menu) to \(Int(HDMVMenuAuthor.maxLoopSeconds)) seconds", code: 2)
+                }
                 request.menu?.loopSeconds = seconds
             }
         }

@@ -11,7 +11,7 @@ For BDMV folder and ISO output, when `EncodeRequest.menu` is set:
 - `MovieObject.bdmv` is replaced. Object 0 is the film (title 1). Object 1 + p stores page p's default button in PSR10, then plays the page's playlist in a loop. The page's IG composition names no default button, so players take PSR10, and a loop restart keeps the viewer's selection.
 - `index.bdmv` is replaced. First Play and Top Menu both open the first page.
 - Everything new is also copied into `BDMV/BACKUP`.
-- ISO output with a menu authors the folder in the work directory, then writes it with `UDFImageWriter`. That is a Swift port of tsMuxeR's UDF 2.50 writer. With `--constant-iso-hdr` its output is byte-identical to tsMuxeR's image of the same folder.
+- ISO output with a menu authors the folder in the work directory, then writes it with `UDFImageWriter`. The writer plans the whole file tree before it writes. It sizes the metadata partition from the directories, files and identifiers the tree has, never below tsMuxeR's size, so many-chapter menus fit. It lets directories span sectors, stores Latin-1 or UTF-16 names at their encoded length (254 Latin-1 or 127 other characters at most), and refuses a source without `BDMV/index.bdmv`. It writes through a temporary file that is renamed at the end, so an image written inside its own source folder is never read back into itself. `UDFImageWriter.checkLayout(menuPages:)` runs the same planning as a pre-flight check. That is a Swift port of tsMuxeR's UDF 2.50 writer. With `--constant-iso-hdr` its output is byte-identical to tsMuxeR's image of the same folder.
 
 M2TS-only output ignores the menu, and the plan says so.
 
