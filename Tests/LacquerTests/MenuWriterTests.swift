@@ -620,6 +620,201 @@ final class UDFImageTests: XCTestCase {
     }
 }
 
+/// Reads back what UDFImageWriter writes: the metadata partition at sector
+/// 320 (tag locations relative to it) and file data in the physical
+/// partition at sector 288.
+private struct UDFReader {
+    let b: [UInt8]
+    static let metadata = 320, physical = 288
+
+    func le16(_ at: Int) -> Int { Int(b[at]) | Int(b[at + 1]) << 8 }
+    func le32(_ at: Int) -> Int { le16(at) | le16(at + 2) << 16 }
+
+    struct Item { var name: String; var lbn: Int; var isDirectory: Bool; var tagLocation: Int; var startSector: Int }
+
+    /// Root directory's metadata block, from the file set descriptor.
+    var root: Int { le32(Self.metadata * 2048 + 400 + 4) }
+
+    /// Children of the directory whose file entry is at metadata block `lbn`.
+    func list(_ lbn: Int) -> [Item] {
+        let fe = (Self.metadata + lbn) * 2048
+        precondition(le16(fe) == 266, "not an extended file entry")
+        let length = le32(fe + 216), dataBlock = le32(fe + 220)
+        let start = (Self.metadata + dataBlock) * 2048
+        var items: [Item] = []
+        var off = 0
+        while off < length {
+            let at = start + off
+            precondition(le16(at) == 257, "not a file identifier at \(off)")
+            let chars = b[at + 18], lfi = Int(b[at + 19]), liu = le16(at + 36)
+            let id = Array(b[(at + 38 + liu)..<(at + 38 + liu + lfi)])
+            var name = ""
+            if id.first == 8 { name = String(id.dropFirst().map { Character(Unicode.Scalar($0)) }) }
+            if id.first == 16 {
+                let units = stride(from: 1, to: id.count, by: 2).map { UInt16(id[$0]) << 8 | UInt16(id[$0 + 1]) }
+                name = String(decoding: units, as: UTF16.self)
+            }
+            if chars & 0x08 == 0 {
+                items.append(Item(name: name, lbn: le32(at + 24), isDirectory: chars & 0x02 != 0,
+                                  tagLocation: le32(at + 12), startSector: dataBlock + off / 2048))
+            }
+            off += (38 + liu + lfi + 3) / 4 * 4
+        }
+        return items
+    }
+
+    func find(_ path: String) -> Item? {
+        var dir = root
+        var found: Item?
+        for part in path.split(separator: "/").map(String.init) {
+            guard let item = list(dir).first(where: { $0.name == part }) else { return nil }
+            found = item
+            dir = item.lbn
+        }
+        return found
+    }
+
+    func contents(_ item: Item) -> [UInt8] {
+        let fe = (Self.metadata + item.lbn) * 2048
+        let size = le32(fe + 56)
+        var out: [UInt8] = []
+        var ad = fe + 216 + le32(fe + 208)
+        let end = ad + le32(fe + 212)
+        while ad < end {
+            let len = le32(ad) & 0x3FFF_FFFF, lbn = le32(ad + 4)
+            let at = (Self.physical + lbn) * 2048
+            out += b[at..<(at + len)]
+            ad += 16
+        }
+        return Array(out.prefix(size))
+    }
+}
+
+final class UDFLayoutTests: XCTestCase {
+    private let fm = FileManager.default
+
+    private func makeDisc(_ files: [String: String] = [:]) throws -> URL {
+        let dir = fm.temporaryDirectory.appendingPathComponent("udf-\(UUID())")
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        try fm.createDirectory(at: dir.appendingPathComponent("BDMV"), withIntermediateDirectories: true)
+        try Data("INDX0200".utf8).write(to: dir.appendingPathComponent("BDMV/index.bdmv"))
+        for (path, text) in files {
+            let url = dir.appendingPathComponent(path)
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(text.utf8).write(to: url)
+        }
+        return dir
+    }
+
+    private func image(_ disc: URL, to iso: URL? = nil) throws -> UDFReader {
+        let out = iso ?? disc.deletingLastPathComponent().appendingPathComponent(disc.lastPathComponent + ".iso")
+        addTeardownBlock { try? FileManager.default.removeItem(at: out) }
+        try UDFImageWriter.writeImage(of: disc, to: out, label: "TEST", header: .reproducible)
+        return UDFReader(b: [UInt8](try Data(contentsOf: out)))
+    }
+
+    func testFortyEntryDirectorySpansSectors() throws {
+        var files: [String: String] = [:]
+        for i in 0..<40 { files[String(format: "BDMV/PLAYLIST/%05d.mpls", i)] = "MPLS\(i)" }
+        let r = try image(try makeDisc(files))
+        let playlist = try XCTUnwrap(r.find("BDMV/PLAYLIST"))
+        let items = r.list(playlist.lbn)
+        XCTAssertEqual(items.map(\.name), (0..<40).map { String(format: "%05d.mpls", $0) })
+        XCTAssertGreaterThan(Set(items.map(\.startSector)).count, 1, "the identifiers fill more than one sector")
+        for item in items { XCTAssertEqual(item.tagLocation, item.startSector, "\(item.name) tag names its sector") }
+        XCTAssertEqual(String(decoding: r.contents(items[39]), as: UTF8.self), "MPLS39")
+    }
+
+    func testUnicodeNamesKeepEveryCharacter() throws {
+        let r = try image(try makeDisc(["BDMV/AUXDATA/中.txt": "chinese", "BDMV/AUXDATA/café.txt": "latin"]))
+        let aux = try XCTUnwrap(r.find("BDMV/AUXDATA"))
+        XCTAssertEqual(Set(r.list(aux.lbn).map(\.name)), ["中.txt", "café.txt"])
+        XCTAssertEqual(String(decoding: r.contents(try XCTUnwrap(r.find("BDMV/AUXDATA/中.txt"))), as: UTF8.self), "chinese")
+        XCTAssertEqual(try UDFImageWriter.fileIdentifier("中.txt"), [16, 0x4E, 0x2D, 0, 0x2E, 0, 0x74, 0, 0x78, 0, 0x74])
+        XCTAssertEqual(try UDFImageWriter.fileIdentifier("café"), [8, 0x63, 0x61, 0x66, 0xE9])
+    }
+
+    func testIdentifierLengthLimit() throws {
+        XCTAssertEqual(try UDFImageWriter.fileIdentifier(String(repeating: "a", count: 254)).count, 255)
+        XCTAssertThrowsError(try UDFImageWriter.fileIdentifier(String(repeating: "a", count: 255)))
+        XCTAssertThrowsError(try UDFImageWriter.fileIdentifier(String(repeating: "中", count: 128)))
+        // A 255-byte name (the most APFS allows) is refused cleanly, not trapped on.
+        let disc = try makeDisc(["BDMV/AUXDATA/" + String(repeating: "a", count: 255): "x"])
+        let out = disc.appendingPathExtension("iso")
+        XCTAssertThrowsError(try UDFImageWriter.writeImage(of: disc, to: out, label: "T")) { e in
+            XCTAssertTrue(e.localizedDescription.contains("254 Latin-1"), e.localizedDescription)
+        }
+        XCTAssertFalse(fm.fileExists(atPath: out.path))
+        let ok = try image(try makeDisc(["BDMV/AUXDATA/" + String(repeating: "b", count: 254): "y"]))
+        XCTAssertNotNil(ok.find("BDMV/AUXDATA/" + String(repeating: "b", count: 254)))
+    }
+
+    func testImageInsideItsSourceIsLeftOut() throws {
+        let disc = try makeDisc(["BDMV/AUXDATA/x.txt": "hello"])
+        let iso = disc.appendingPathComponent("disc.iso")
+        try UDFImageWriter.writeImage(of: disc, to: iso, label: "T", header: .reproducible)
+        let first = try Data(contentsOf: iso)
+        // An alias of the output elsewhere in the tree, through a symlink.
+        try fm.createSymbolicLink(at: disc.appendingPathComponent("BDMV/AUXDATA/alias.iso"), withDestinationURL: iso)
+        try UDFImageWriter.writeImage(of: disc, to: iso, label: "T", header: .reproducible)
+        XCTAssertEqual(try Data(contentsOf: iso), first, "the old image isn't copied into the new one")
+        let leftovers = try fm.contentsOfDirectory(atPath: disc.path).filter { $0.contains("partial") }
+        XCTAssertEqual(leftovers, [])
+        // Through a symlinked path to the folder, too.
+        let link = fm.temporaryDirectory.appendingPathComponent("udf-link-\(UUID())")
+        try fm.createSymbolicLink(at: link, withDestinationURL: disc)
+        defer { try? fm.removeItem(at: link) }
+        try UDFImageWriter.writeImage(of: disc, to: link.appendingPathComponent("disc.iso"), label: "T", header: .reproducible)
+        XCTAssertEqual(try Data(contentsOf: iso), first)
+    }
+
+    func testMissingOrNonDiscSourceFails() throws {
+        let out = fm.temporaryDirectory.appendingPathComponent("udf-out-\(UUID()).iso")
+        defer { try? fm.removeItem(at: out) }
+        let missing = fm.temporaryDirectory.appendingPathComponent("udf-missing-\(UUID())")
+        XCTAssertThrowsError(try UDFImageWriter.writeImage(of: missing, to: out, label: "T"))
+        let plain = fm.temporaryDirectory.appendingPathComponent("udf-plain-\(UUID())")
+        try Data("x".utf8).write(to: plain)
+        defer { try? fm.removeItem(at: plain) }
+        XCTAssertThrowsError(try UDFImageWriter.writeImage(of: plain, to: out, label: "T"))
+        let noIndex = fm.temporaryDirectory.appendingPathComponent("udf-noindex-\(UUID())")
+        try fm.createDirectory(at: noIndex.appendingPathComponent("BDMV/STREAM"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: noIndex) }
+        XCTAssertThrowsError(try UDFImageWriter.writeImage(of: noIndex, to: out, label: "T")) { e in
+            XCTAssertTrue(e.localizedDescription.contains("index.bdmv"), e.localizedDescription)
+        }
+        XCTAssertFalse(fm.fileExists(atPath: out.path), "no blank image is left behind")
+    }
+
+    func test217ChapterMenuImages() throws {
+        // 217 chapters at six per scene page: a main page and 37 scene pages.
+        let pages = 1 + (217 + 5) / 6
+        let layout = try UDFImageWriter.checkLayout(menuPages: pages)
+        XCTAssertGreaterThan(layout.metadataSectors, 0x30000 / 2048, "more than tsMuxeR's fixed reservation")
+        var files: [String: String] = [:]
+        for path in UDFImageWriter.menuDiscPaths(menuPages: pages) { files[path] = path }
+        let r = try image(try makeDisc(files))
+        let stream = try XCTUnwrap(r.find("BDMV/STREAM"))
+        XCTAssertEqual(r.list(stream.lbn).count, pages + 1)
+        let last = String(format: "BDMV/BACKUP/PLAYLIST/%05d.mpls", 1000 + pages - 1)
+        XCTAssertEqual(String(decoding: r.contents(try XCTUnwrap(r.find(last))), as: UTF8.self), last)
+        XCTAssertThrowsError(try UDFImageWriter.checkLayout(menuPages: 1001))
+    }
+
+    func testMenuLoopMustBeFiniteAndBounded() throws {
+        let film = PlaylistSummary(markCount: 1, subtitleStreams: 0, audioStreams: 1)
+        var menu = MenuDemo.make(title: "T", chapterTimes: [0], subtitles: false)
+        for bad in [Double.infinity, -Double.infinity, .nan, 601, 1e12] {
+            menu.loopSeconds = bad
+            XCTAssertThrowsError(try HDMVMenuAuthor.navigation(for: menu, film: film), "\(bad)")
+        }
+        for good in [-1.0, 0, 30, 600] {
+            menu.loopSeconds = good
+            XCTAssertNoThrow(try HDMVMenuAuthor.navigation(for: menu, film: film), "\(good)")
+        }
+    }
+}
+
 final class ChapterAlignmentTests: XCTestCase {
     func testChaptersLandOnFrameStartsAndMarksRoundUp() {
         // Frame 959 starts at 39.99829 s: the mark rounds up to 39.999, not

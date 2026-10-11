@@ -188,6 +188,16 @@ for style in fullFrame titleCard typographic; do
     done
 done
 
+echo "== menus: 100 chapters (14 menu pages) as a UDF 2.50 ISO"
+# More files and folders than tsMuxeR's fixed metadata reservation holds.
+many="$(awk 'BEGIN { for (i = 0; i < 100; i++) printf "%s%d.%d", (i ? "," : ""), i / 10, i % 10 }')"
+if run --mode iso --input "$FX/menufilm.mp4" --chapters "$many" --menu-demo --menu-loop 2; then
+    disc="$(awk '/^output: / {print $2}' "$WORK/run.txt")"
+    d="$(mount_iso "$disc")"
+    check "100-chapter menu clips" "$(ls "$d/BDMV/STREAM" | wc -l | tr -d ' ')" "15"
+    menu_check "100-chapter iso" "$disc"
+fi
+
 echo "== too long for the disc is refused before encoding"
 # 60 hours at 1 fps: past what BD-25 holds even at the 1 Mbps floor.
 "$FF" "${q[@]}" -f lavfi -i color=c=black:s=64x64:r=1:d=216000 -c:v libx264 -preset ultrafast "$FX/marathon.mkv"
