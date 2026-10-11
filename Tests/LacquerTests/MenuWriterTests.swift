@@ -475,6 +475,97 @@ final class MenuNavigationTests: XCTestCase {
     }
 }
 
+final class IGBudgetAndMapTests: XCTestCase {
+    /// A smooth horizontal colour ramp: more colours than a palette holds,
+    /// so a full palette gives short runs and a small one long runs.
+    private func ramp(width: Int, height: Int, hue: Int) -> CGImage {
+        var px = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = (y * width + x) * 4
+                px[i] = UInt8(x * 255 / (width - 1))
+                px[i + 1] = UInt8(hue * 80)
+                px[i + 2] = UInt8(255 - x * 255 / (width - 1))
+            }
+        }
+        let ctx = CGContext(data: &px, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        return ctx.makeImage()!
+    }
+
+    private func rampButtons(_ n: Int, width: Int = 600, height: Int = 100, sameHue: Bool = false) -> [IGSEncoder.Button] {
+        (0..<n).map { i in
+            IGSEncoder.Button(rect: CGRect(x: 100, y: 100 + i * (height + 10), width: width, height: height),
+                              normal: ramp(width: width, height: height, hue: 0),
+                              selected: ramp(width: width, height: height, hue: sameHue ? 0 : 1),
+                              activated: ramp(width: width, height: height, hue: sameHue ? 0 : 2),
+                              up: i, down: i, left: i, right: i, commands: [])
+        }
+    }
+
+    func testOversizedGraphicsDropToFewerColours() throws {
+        let buttons = rampButtons(2)
+        let full = try IGSEncoder.displaySet(buttons: buttons, defaultButton: nil, maxCodedBytes: .max)
+        XCTAssertEqual(full.paletteSize, 255)
+        let again = try IGSEncoder.displaySet(buttons: buttons, defaultButton: nil, maxCodedBytes: .max)
+        XCTAssertEqual(again.segments.map(\.bytes), full.segments.map(\.bytes), "same images, same bytes")
+        let limit = full.codedBytes - 1
+        let reduced = try IGSEncoder.displaySet(buttons: buttons, defaultButton: nil, maxCodedBytes: limit)
+        XCTAssertEqual(reduced.paletteSize, 127)
+        XCTAssertLessThanOrEqual(reduced.codedBytes, limit)
+    }
+
+    func testGraphicsThatCantFitAreRefused() {
+        XCTAssertThrowsError(try IGSEncoder.displaySet(buttons: rampButtons(1), defaultButton: nil, maxCodedBytes: 2000)) { e in
+            guard case IGSEncoder.EncodeError.graphicsTooLarge(_, let limit) = e else { return XCTFail("\(e)") }
+            XCTAssertEqual(limit, 2000)
+        }
+    }
+
+    func testDefaultBudgetIsTheCodedDataBuffer() throws {
+        XCTAssertEqual(IGSEncoder.codedDataBufferBytes, 1_048_576)
+        // Three wide ramp buttons: over 1 MiB at 255 colours (about 255
+        // runs a row), so the default budget has to cut the palette.
+        let buttons = rampButtons(3, width: 1700, height: 160, sameHue: true)
+        let full = try IGSEncoder.displaySet(buttons: buttons, defaultButton: nil, maxCodedBytes: .max)
+        XCTAssertGreaterThan(full.codedBytes, IGSEncoder.codedDataBufferBytes)
+        let set = try IGSEncoder.displaySet(buttons: buttons, defaultButton: nil)
+        XCTAssertLessThan(set.paletteSize, full.paletteSize)
+        XCTAssertLessThanOrEqual(set.codedBytes, IGSEncoder.codedDataBufferBytes)
+    }
+
+    func testStateHashesMatchTheObjectsAsDrawn() throws {
+        let set = try IGSEncoder.displaySet(buttons: rampButtons(1, width: 64, height: 16), defaultButton: 0)
+        XCTAssertEqual(IGSEncoder.fnv1a(Array("a".utf8)), 0xE40C_292C)
+        XCTAssertEqual(set.stateHashes.count, 1)
+        // Decode each object's RLE the way a player does and hash it.
+        let objects = set.segments.filter { $0.bytes[0] == 0x15 }
+        for (state, ods) in objects.enumerated() {
+            let indices = RLE.decode(Array(ods.bytes[14...]), width: 64, height: 16)!
+            XCTAssertEqual(IGSEncoder.fnv1a(indices), set.stateHashes[0][state])
+        }
+        XCTAssertEqual(Set(set.stateHashes[0]).count, 3, "the three states can be told apart")
+    }
+
+    func testMenuMapJSON() throws {
+        typealias Map = HDMVMenuAuthor.MenuMap
+        XCTAssertEqual(Map.action(.playChapter(4)), Map.Action(type: "playChapter", value: 4))
+        XCTAssertEqual(Map.action(.setSubtitles(on: false)), Map.Action(type: "setSubtitles", value: 0))
+        XCTAssertEqual(Map.action(.playFilm), Map.Action(type: "playFilm", value: nil))
+        let map = Map(filmPlaylist: 0, firstPage: 0, loops: true, filmSubtitles: true, chapters: [0, 20.02],
+                      pages: [Map.Page(playlist: 1000, defaultButton: 0, paletteSize: 12, graphicsBytes: 900,
+                                       buttons: [Map.Button(id: 0, rect: [10, 20, 30, 40], up: nil, down: 1,
+                                                            left: nil, right: nil, action: Map.action(.playFilm),
+                                                            stateHashes: [1, 2, 4_000_000_000])])])
+        let data = try map.json()
+        XCTAssertEqual(try JSONDecoder().decode(Map.self, from: data), map)
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(text.contains("\"playlist\" : 1000"), text)
+        XCTAssertFalse(text.contains("\"up\""), "nil neighbours are left out")
+    }
+}
+
 final class UDFImageTests: XCTestCase {
     func testDString() {
         XCTAssertEqual(UDFImageWriter.dstring("BD", fieldLength: 6), [8, 0x42, 0x44, 0, 0, 3])

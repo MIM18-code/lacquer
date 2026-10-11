@@ -32,6 +32,14 @@ struct IGSegment: Sendable {
 /// palette, every button state as an object, and the end segment.
 struct IGDisplaySet: Sendable {
     var segments: [IGSegment]
+    /// Per button, FNV-1a of the palette indices of its normal, selected
+    /// and activated images: what a player draws, for the menu map.
+    var stateHashes: [[UInt32]] = []
+    /// Palette entries used, not counting transparent entry 0.
+    var paletteSize = 0
+
+    /// Bytes of every segment: what the player's IG coded-data buffer holds.
+    var codedBytes: Int { segments.reduce(0) { $0 + $1.bytes.count } }
 
     /// Offset of composition_timeout_pts inside the ICS segment: header (3),
     /// video descriptor (5), composition descriptor (3), sequence
@@ -130,12 +138,15 @@ enum IGSEncoder {
     enum EncodeError: LocalizedError {
         case tooManyButtons(Int)
         case compositionTooLarge(Int)
+        case graphicsTooLarge(Int, limit: Int)
         case badButtonImage(Int, String)
 
         var errorDescription: String? {
             switch self {
             case .tooManyButtons(let n): return "A menu page has \(n) buttons; HDMV allows 255 per page."
             case .compositionTooLarge(let n): return "A menu page's button table is \(n) bytes, more than one segment holds."
+            case .graphicsTooLarge(let n, let limit):
+                return "A menu page's button graphics need \(n / 1024) KB even at 15 colours; players hold \(limit / 1024) KB. Use fewer or simpler buttons."
             case .badButtonImage(let i, let why): return "Menu button \(i + 1): \(why)."
             }
         }
@@ -144,8 +155,17 @@ enum IGSEncoder {
     /// `frameRateCode` 1 = 23.976 (the menu clip's video rate). A nil
     /// `defaultButton` leaves the choice to the selection the movie object
     /// stored (PSR10).
+    /// The IG decoder's coded-data buffer: a page's whole display set has to
+    /// fit in it.
+    static let codedDataBufferBytes = 1_048_576
+
+    /// Palette sizes tried, largest first, when a page's graphics don't fit
+    /// the coded-data buffer. Fewer colours give longer runs.
+    static let paletteSteps = [255, 127, 63, 31, 15]
+
     static func displaySet(buttons: [Button], defaultButton: Int?,
-                           width: Int = 1920, height: Int = 1080, frameRateCode: Int = 1) throws -> IGDisplaySet {
+                           width: Int = 1920, height: Int = 1080, frameRateCode: Int = 1,
+                           maxCodedBytes: Int = codedDataBufferBytes) throws -> IGDisplaySet {
         guard buttons.count <= 255 else { throw EncodeError.tooManyButtons(buttons.count) }
 
         // ---- Pixels of every state image, then one palette for the page.
@@ -165,15 +185,6 @@ enum IGSEncoder {
                 images.append(RGBAImage(image))
             }
         }
-        var palette = PaletteQuantizer.palette(for: images)
-
-        // ---- Objects: ids 3i, 3i+1, 3i+2 for normal, selected, activated.
-        var objectSegments: [IGSegment] = []
-        for (n, image) in images.enumerated() {
-            let rle = RLE.encode(palette.indices(for: image), width: image.width, height: image.height)
-            objectSegments += objectDefinition(id: n, width: image.width, height: image.height, rle: rle)
-        }
-
         // ---- Composition.
         var c = ByteWriter()
         c.u16(width); c.u16(height)
@@ -214,11 +225,38 @@ enum IGSEncoder {
         c.patchLength(at: dataLength, width: 3)
 
         guard c.count <= maxSegmentBody else { throw EncodeError.compositionTooLarge(c.count) }
-        var segments = [segment(0x18, c.bytes, .composition)]
-        segments.append(segment(0x14, palette.definition(), .palette))
-        segments += objectSegments
-        segments.append(segment(0x80, [], .end))
-        return IGDisplaySet(segments: segments)
+
+        // ---- Palette and objects (ids 3i, 3i+1, 3i+2 for normal, selected,
+        // activated), with fewer colours until the set fits the buffer.
+        var lastSize = 0
+        for colours in paletteSteps {
+            var palette = PaletteQuantizer.palette(for: images, maxColors: colours)
+            var objectSegments: [IGSegment] = []
+            var hashes: [UInt32] = []
+            for (n, image) in images.enumerated() {
+                let indices = palette.indices(for: image)
+                hashes.append(fnv1a(indices))
+                let rle = RLE.encode(indices, width: image.width, height: image.height)
+                objectSegments += objectDefinition(id: n, width: image.width, height: image.height, rle: rle)
+            }
+            var segments = [segment(0x18, c.bytes, .composition)]
+            segments.append(segment(0x14, palette.definition(), .palette))
+            segments += objectSegments
+            segments.append(segment(0x80, [], .end))
+            var set = IGDisplaySet(segments: segments)
+            set.stateHashes = stride(from: 0, to: hashes.count, by: 3).map { Array(hashes[$0..<$0 + 3]) }
+            set.paletteSize = palette.colors.count
+            lastSize = set.codedBytes
+            if lastSize <= maxCodedBytes { return set }
+        }
+        throw EncodeError.graphicsTooLarge(lastSize, limit: maxCodedBytes)
+    }
+
+    /// 32-bit FNV-1a; menu_check computes the same over what libbluray draws.
+    static func fnv1a(_ bytes: [UInt8]) -> UInt32 {
+        var h: UInt32 = 0x811C_9DC5
+        for b in bytes { h = (h ^ UInt32(b)) &* 0x0100_0193 }
+        return h
     }
 
     private static func segment(_ type: UInt8, _ body: [UInt8], _ kind: IGSegment.Kind) -> IGSegment {
@@ -359,9 +397,12 @@ enum PaletteQuantizer {
             }
         }
         func rgba(_ k: UInt32) -> [Int] { [Int(k >> 24), Int((k >> 16) & 0xFF), Int((k >> 8) & 0xFF), Int(k & 0xFF)] }
-        let entries = histogram.map { (color: rgba($0.key), count: $0.value) }
+        // Sorted so the same images always give the same palette (a
+        // Dictionary's order changes from run to run).
+        let entries = histogram.sorted { $0.key < $1.key }.map { (color: rgba($0.key), count: $0.value) }
         if entries.count <= maxColors {
-            return IGPalette(colors: entries.sorted { $0.count > $1.count }.map { $0.color.map(UInt8.init) })
+            let byUse = entries.enumerated().sorted { ($1.element.count, $0.offset) < ($0.element.count, $1.offset) }
+            return IGPalette(colors: byUse.map { $0.element.color.map(UInt8.init) })
         }
 
         var boxes: [[(color: [Int], count: Int)]] = [entries]
@@ -378,7 +419,11 @@ enum PaletteQuantizer {
                 }
             }
             if bestBox < 0 { break }
-            let sorted = boxes[bestBox].sorted { $0.color[bestChannel] < $1.color[bestChannel] }
+            let sorted = boxes[bestBox].sorted {
+                $0.color[bestChannel] != $1.color[bestChannel]
+                    ? $0.color[bestChannel] < $1.color[bestChannel]
+                    : $0.color.lexicographicallyPrecedes($1.color)
+            }
             let total = sorted.reduce(0) { $0 + $1.count }
             var running = 0, cut = 1
             for (i, e) in sorted.enumerated() {
