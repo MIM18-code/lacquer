@@ -192,6 +192,7 @@ struct BluRayEncoder {
         source: MediaInfo,
         capabilities: Capabilities,
         twoPass: Bool,
+        keyframes: [Double] = [],
         logger: RunLogger? = nil,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
@@ -221,6 +222,7 @@ struct BluRayEncoder {
                 "-maxrate", "35000k",
                 "-bufsize", "30000k",
                 "-x264-params", x264Joined,
+            ] + Self.forcedKeyframeArguments(keyframes, standard: standard) + [
                 "-f", "h264",
                 "-progress", "pipe:1",
                 "-nostats"
@@ -261,6 +263,15 @@ struct BluRayEncoder {
             try await runFFmpeg(args: args, duration: duration, logger: logger,
                                 subprocessName: "ffmpeg video", progress: progress)
         }
+    }
+
+    /// `-force_key_frames` for the chapter starts. ffmpeg forces the first
+    /// frame at or after each time, so aim half a frame early to hit the
+    /// frame that starts there despite rounding.
+    static func forcedKeyframeArguments(_ times: [Double], standard: VideoStandard) -> [String] {
+        let halfFrame = 0.5 / standard.frameRateValue
+        let list = times.filter { $0 > halfFrame }.map { String(format: "%.4f", $0 - halfFrame) }
+        return list.isEmpty ? [] : ["-force_key_frames", list.joined(separator: ",")]
     }
 
     // MARK: - Audio

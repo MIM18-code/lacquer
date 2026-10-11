@@ -422,7 +422,12 @@ struct BDMVAuthor {
         // (e.g. when floating-point drift in auto-chapter accumulation
         // pushes the fractional part to ≥ 0.9995). Going via integer
         // milliseconds avoids the carry-over entirely.
-        let totalMs = Int((seconds * 1000).rounded())
+        //
+        // Round up, not to nearest: chapters sit on frame starts that fall
+        // between milliseconds (20.0208 s at 23.976), and a mark even 0.1 ms
+        // before the chapter's IDR frame makes players seek to the GOP
+        // before it. The small epsilon keeps whole milliseconds whole.
+        let totalMs = Int((seconds * 1000 - 1e-6).rounded(.up))
         let totalSec = totalMs / 1000
         let h  = totalSec / 3600
         let m  = (totalSec % 3600) / 60
