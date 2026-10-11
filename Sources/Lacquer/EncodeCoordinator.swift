@@ -207,7 +207,11 @@ final class EncodeCoordinator: ObservableObject {
         }
         stopRequested = false
         runTask = Task { [weak self] in
-            await self?.runQueue()
+            // A pop-up menu applies its new value a beat after it closes, so
+            // "pick BDMV, press ⌘↩" could start with the old setting. Give
+            // that change time to land before the first job reads settings.
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            if !Task.isCancelled { await self?.runQueue() }
             self?.runTask = nil
         }
     }

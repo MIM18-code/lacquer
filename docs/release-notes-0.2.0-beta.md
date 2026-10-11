@@ -13,6 +13,7 @@ What it does
 
 Known limits
 - libbluray, the library VLC uses, has checked the menus and discs, but no hardware player has played them yet. Burn one disc and test it on your player before a duplication run.
+- In VLC, a menu button pressed while playback is paused waits until you resume, and any presses you made while it was paused are ignored. Press Play again after resuming. Hardware players don't pause on menus.
 - No E-AC-3, TrueHD or DTS audio, because those formats need licences.
 - No Intel build.
 
