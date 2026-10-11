@@ -42,16 +42,18 @@ Chapters now sit on IDR frames. Chapter times snap to frame starts, the film enc
 
 ## Verified
 
-`Scripts/menu-check` drives a disc through libbluray 1.5.0's HDMV navigation (the code VLC uses). Build it with `Scripts/menu-check/build.sh` (needs `brew install libbluray`). Run it on `--menu-demo` output: `menu_check DISC --chapters 0,20,40 --subtitles`, adding `--still` for a still menu. All 19 checks pass on the BDMV folder, on the ISO, and on a still menu:
+`Scripts/menu-check` drives a disc through libbluray 1.5.0's HDMV navigation (the code VLC uses). Build it with `Scripts/menu-check/build.sh` (needs `brew install libbluray`).
 
-- First Play shows the 4-button main page, with Play selected.
-- Down and Up move the selection. Right with no neighbour does nothing.
-- The selection survives the menu loop restarting. A still menu holds and stays live.
-- Play draws activated and starts title 1 (00000.mpls) at 0:00.
-- Top Menu during the film returns to the menu.
-- Scenes opens the chapter page. Each chapter button starts at its chapter (0.00, 20.01, 39.99 s).
-- Back returns to the main page.
-- Subtitles On and Off keep the menu up, and the film then plays with PG stream 1 shown or hidden.
+It checks any menu, not only the demo. When the headless CLI authors a menu it writes `<name>.menu.json` next to the disc. The map lists each page's playlist and default button, and for every button its id, rect, remote neighbours, action, and a hash of each state image. Run `menu_check DISC --map <name>.menu.json`. For every page it checks:
+
+- Entering the page draws exactly its buttons, with the default one selected.
+- Every up/down/left/right edge moves the selection where the map says. A missing edge leaves it alone.
+- Every button does what its action says. Play starts the film at 0 s in chapter 1. A chapter button starts its chapter at its time. A page button opens that page. Subtitles On/Off keep the menu up, and the film then plays with PG stream 1 shown or hidden.
+- Top Menu from the film returns to the first page. The selection survives the menu loop restarting, or a still menu holds.
+
+libbluray doesn't export its player registers, so PSR10 can't be read. The harness reads the selection from the overlay instead. A draw's position names the button, and the FNV-1a of its palette indices names the state. The encoder records those hashes, so the match is exact rather than a guess from brightness.
+
+Results: the demo menu and all three designer styles (fullFrame, titleCard, typographic) pass, with 3 chapters (one scene page) and 8 chapters (two scene pages), as BDMV folders and as ISOs.
 
 `swift test` has byte-level tests for every writer. The MPLS writer reproduces tsMuxeR's film playlist byte for byte. `Scripts/e2e_test.sh` authors a menu disc as a folder and as an ISO, mounts the ISO, checks the streams, and runs the harness when it builds.
 
@@ -62,10 +64,10 @@ No hardware player has played these discs. These choices follow the spec as libb
 - IG timing. Segment decode and presentation times assume 16 Mbit/s delivery, an 8 Mpixel/s object decode rate, and a plane clear of about 130 ms. libbluray ignores IG timestamps.
 - `composition_timeout_pts` and `selection_timeout_pts` are set to the clip's end, not 0. The spec text on 0 wasn't available.
 - A looping menu redraws its buttons when the clip restarts (the IG epoch starts again). libbluray keeps the selection, but a player may blink the buttons.
-- Large pages. The IG coded-data buffer is small (about 1 MB). Many big, detailed buttons could exceed it, and nothing checks for that yet.
+- Large pages. A page's IG display set must fit the 1 MiB coded-data buffer. The encoder measures it and retries with 127, 63, 31 and 15 colours, then refuses the page. The 1 MiB figure is from memory of the spec, not checked against it.
 - Menu video: no B-frames, CRF 16 with a 15 Mbit/s VBV, four slices, level 4.1, one-second GOPs.
 
-Test plan: burn the `--menu-demo` ISO to BD-R and try it on two or three players (a PS4/PS5 or Xbox and a standalone Sony or Panasonic). Check that the menu appears, the remote moves the selection, each button works, Top Menu works during the film, and the menu loop doesn't flicker.
+Test plan: burn a `--menu titleCard` ISO with 8 chapters to BD-R and try it on two or three players (a PS4/PS5 or Xbox and a standalone Sony or Panasonic). Check that the menu appears, the remote moves the selection, each button works, Top Menu works during the film, and the menu loop doesn't flicker.
 
 ## Files
 

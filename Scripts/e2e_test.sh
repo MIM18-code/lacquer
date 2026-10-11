@@ -139,6 +139,13 @@ printf '1\n00:00:01,000 --> 00:00:03,000\nHello\n' > "$FX/menufilm.srt"
 # libbluray harness (Homebrew libbluray); skipped when it can't be built.
 MENU_CHECK="$PWD/Scripts/menu-check/menu_check"
 [ -x "$MENU_CHECK" ] || Scripts/menu-check/build.sh >/dev/null 2>&1 || echo "  (menu_check not built: brew install libbluray to run it)"
+# menu_check <label> <disc>: drive the disc through libbluray against the menu
+# map the CLI wrote next to it.
+menu_check() {
+    [ -x "$MENU_CHECK" ] || return 0
+    local map; map="$(awk '/menu map: / {print $NF}' "$WORK/run.txt")"
+    check "$1 libbluray menu check" "$("$MENU_CHECK" "$2" --map "$map" | tail -1 | sed 's/: [0-9]* passed,/:/')" "ALL PASSED: 0 failed"
+}
 for mode in bdmv iso; do
     run --mode "$mode" --input "$FX/menufilm.mp4" --chapters "00:00,00:05" --srt "$FX/menufilm.srt" --menu-demo || continue
     if [ "$mode" = bdmv ]; then disc="$OUT/menufilm_BluRay"; d="$disc"; else
@@ -150,9 +157,21 @@ for mode in bdmv iso; do
     check "$mode menu stream" "$(probe "$d/BDMV/STREAM/01000.m2ts" v:0 r_frame_rate)" "24000/1001"
     check "$mode film keeps subtitles" "$(probe "$d/BDMV/STREAM/00000.m2ts" s:0 codec_name)" "hdmv_pgs_subtitle"
     check "$mode backup copies" "$(cmp -s "$d/BDMV/index.bdmv" "$d/BDMV/BACKUP/index.bdmv" && echo same)" "same"
-    if [ -x "$MENU_CHECK" ]; then
-        check "$mode libbluray menu check" "$("$MENU_CHECK" "$disc" --chapters 0,5 --subtitles | tail -1)" "ALL PASSED: 0 check(s) failed"
-    fi
+    menu_check "$mode demo" "$disc"
+done
+
+echo "== menus: the designer's three styles, scene paging, folder and ISO"
+"$FF" "${q[@]}" -f lavfi -i testsrc2=s=1920x1080:r=24000/1001:d=30 -f lavfi -i sine=f=330:d=30 \
+    -ac 2 -c:v libx264 -preset ultrafast -c:a aac -shortest "$FX/styled.mp4"
+for style in fullFrame titleCard typographic; do
+    # Eight chapters page the 3×2 scene grid; three fit on one page.
+    for variant in "bdmv 0:00,0:03,0:06,0:09,0:12,0:15,0:18,0:21" "iso 0:00,0:08,0:16"; do
+        read -r mode chapters <<< "$variant"
+        run --mode "$mode" --input "$FX/styled.mp4" --chapters "$chapters" --srt "$FX/menufilm.srt" \
+            --menu "$style" --menu-title "The Long Goodbye" || continue
+        menu_check "$style $mode $(tr -cd , <<< "$chapters" | wc -c | awk '{print $1 + 1}')ch" \
+            "$(awk '/^output: / {print $2}' "$WORK/run.txt")"
+    done
 done
 
 echo "== too long for the disc is refused before encoding"

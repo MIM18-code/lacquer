@@ -135,10 +135,70 @@ struct HDMVMenuAuthor {
 
     // MARK: - Authoring
 
+    /// What was authored, for `Scripts/menu-check`: every page's playlist,
+    /// default button and buttons (rect, remote neighbours, action, and a
+    /// hash of each state image as the player will draw it). The headless
+    /// CLI writes it next to the disc as `<name>.menu.json`.
+    struct MenuMap: Codable, Equatable {
+        struct Action: Codable, Equatable {
+            /// playFilm, playChapter, goToPage or setSubtitles.
+            var type: String
+            /// Chapter index, page index, or 1/0 for subtitles on/off.
+            var value: Int?
+        }
+
+        struct Button: Codable, Equatable {
+            var id: Int
+            /// x, y, width, height on the 1920×1080 frame, as authored.
+            var rect: [Int]
+            /// Button ids; absent means the key leaves the selection alone.
+            var up: Int?
+            var down: Int?
+            var left: Int?
+            var right: Int?
+            var action: Action
+            /// FNV-1a of the palette indices of the normal, selected and
+            /// activated images.
+            var stateHashes: [UInt32]
+        }
+
+        struct Page: Codable, Equatable {
+            var playlist: Int
+            var defaultButton: Int
+            var paletteSize: Int
+            var graphicsBytes: Int
+            var buttons: [Button]
+        }
+
+        var filmPlaylist: Int
+        var firstPage: Int
+        var loops: Bool
+        var filmSubtitles: Bool
+        /// Seconds; the pipeline fills these in.
+        var chapters: [Double] = []
+        var pages: [Page]
+
+        static func action(_ a: MenuAction) -> Action {
+            switch a {
+            case .playFilm: return Action(type: "playFilm")
+            case .playChapter(let n): return Action(type: "playChapter", value: n)
+            case .goToPage(let p): return Action(type: "goToPage", value: p)
+            case .setSubtitles(let on): return Action(type: "setSubtitles", value: on ? 1 : 0)
+            }
+        }
+
+        func json() throws -> Data {
+            let e = JSONEncoder()
+            e.outputFormatting = [.prettyPrinted, .sortedKeys]
+            return try e.encode(self)
+        }
+    }
+
     /// `root` is the disc folder (holding BDMV/). `workDir` takes the
     /// intermediate PNG, H.264 and AC-3 files.
+    @discardableResult
     func author(_ menu: DiscMenu, disc root: URL, workDir: URL, logger: RunLogger? = nil,
-                onLog: (@Sendable (String) -> Void)? = nil) async throws {
+                onLog: (@Sendable (String) -> Void)? = nil) async throws -> MenuMap {
         let fm = FileManager.default
         let bdmv = root.appendingPathComponent("BDMV")
         let filmMPLS = bdmv.appendingPathComponent("PLAYLIST/\(Self.clipName(Self.filmPlaylist)).mpls")
@@ -162,6 +222,8 @@ struct HDMVMenuAuthor {
             "-t", String(format: "%.3f", seconds + 0.1),
             "-c:a", "ac3", "-b:a", "192k", "-f", "ac3", silence.path
         ], name: "ffmpeg menu silence", logger: logger)
+        var map = MenuMap(filmPlaylist: Self.filmPlaylist, firstPage: menu.firstPage, loops: loops,
+                          filmSubtitles: film.subtitleStreams > 0, pages: [])
         let allAudio = M2TSMuxer.ac3Frames(try Data(contentsOf: silence))
         let audioFrames = Array(allAudio.prefix(Int((seconds * 48000 / 1536).rounded(.up))))
 
@@ -184,6 +246,15 @@ struct HDMVMenuAuthor {
                                          left: links[2], right: links[3], commands: nav.buttonCommands[p][b])
             }
             let display = try IGSEncoder.displaySet(buttons: buttons, defaultButton: nil)
+            map.pages.append(MenuMap.Page(
+                playlist: number, defaultButton: page.defaultButton, paletteSize: display.paletteSize,
+                graphicsBytes: display.codedBytes,
+                buttons: page.buttons.enumerated().map { b, button in
+                    MenuMap.Button(id: b, rect: [Int(button.rect.minX.rounded()), Int(button.rect.minY.rounded()),
+                                                 Int(button.rect.width.rounded()), Int(button.rect.height.rounded())],
+                                   up: button.up, down: button.down, left: button.left, right: button.right,
+                                   action: MenuMap.action(button.action), stateHashes: display.stateHashes[b])
+                }))
 
             let input = M2TSMuxer.Input(video: units, frameRate: Self.menuFrameRate,
                                         audio: audioFrames, audioBitrateKbps: 192, menu: display)
@@ -200,12 +271,13 @@ struct HDMVMenuAuthor {
                                     marks: [muxed.firstPTS / 2])
             try write(ClipInfoWriter.data(clip), bdmv, "CLIPINF/\(name).clpi")
             try write(PlaylistWriter.data(playlist), bdmv, "PLAYLIST/\(name).mpls")
-            logger?.write("Menu page \(p + 1): \(page.buttons.count) buttons, \(units.count) frames, \(muxed.sourcePackets) packets → STREAM/\(name).m2ts")
+            logger?.write("Menu page \(p + 1): \(page.buttons.count) buttons, \(display.paletteSize) colours, \(display.codedBytes / 1024) KB of graphics, \(units.count) frames, \(muxed.sourcePackets) packets → STREAM/\(name).m2ts")
             onLog?("  ✓ menu page \(p + 1)")
         }
 
         try write(MovieObjectWriter.data(nav.objects), bdmv, "MovieObject.bdmv")
         try write(IndexWriter.data(nav.index), bdmv, "index.bdmv")
+        return map
     }
 
     static func menuStreams() -> [BDStream] {
