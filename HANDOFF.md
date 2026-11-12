@@ -8,6 +8,8 @@ State of the project after the session that took it from a one-off build for a f
 
 **Published 2026-10-11:** Lacquer 0.2.0 beta (build 3), then 0.2.1 beta (build 4, tag `v0.2.1-beta` at f9a45db, DMG SHA-256 `0af8c03e86fff174f453cf71fb31f7cf95134a4126533c7081bd5f14502acd6b`), on github.com/MIM18-code/lacquer and mindinmotionsoftware.com. A second Codex review (personal account, gpt-6.1-sol) found 15 defects; all fixed for 0.2.1 (see reviews/codex-review-2-2026-10-11.md). Still owed: a burned disc on hardware players.
 
+**Published 2026-11-12:** Lacquer 0.2.2 beta (build 5), a maintenance build that replaces 0.2.0 and 0.2.1 as the only published release. The repository's history was rewritten the same day, so commit hashes quoted earlier in this file and in the reviews no longer exist.
+
 - Builds clean with `swift build -Xswiftc -warnings-as-errors`. 31 unit tests and the end-to-end gate (`Scripts/e2e_test.sh`) pass.
 - `packaging/make_dmg.sh` produces a Developer ID signed, notarized and stapled DMG (Apple accepted it with the `backlot-notary` profile).
 - Not yet published. Blocked on: the new name, a hardware disc test, and a public repo.
