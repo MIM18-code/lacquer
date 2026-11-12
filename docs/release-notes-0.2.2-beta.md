@@ -10,3 +10,5 @@ Files
 - Lacquer-0.2.2-arm64.dmg: the app, signed and notarized.
 - Lacquer-0.2.2-source.tar.gz: corresponding source for the app and the bundled FFmpeg, x264, zimg and tsMuxeR, with the build scripts.
 - SHA256SUMS
+
+SHA-256: `55b6d14b38af399a5e3073912bca539b44570f233c12b3d602b037dad68a6b9f`
